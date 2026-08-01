@@ -2,5 +2,6 @@
 
 pub mod llm_client;
 pub mod loop_;
+pub mod message;
 pub mod prompt;
 pub mod sop;
