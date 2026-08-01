@@ -142,12 +142,12 @@ mod tests {
 
     /// 构造一个临时 .devnpc.md 文件并返回其路径
     ///
-    /// 用 `into_path()` 消费 TempDir,避免析构删除文件 (测试用,允许泄漏)。
+    /// 用 `keep()` 消费 TempDir,避免析构删除文件 (测试用,允许泄漏)。
     fn write_devnpc_md(content: &str) -> PathBuf {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join(".devnpc.md");
         std::fs::write(&file_path, content).unwrap();
-        let dir_path = dir.into_path();
+        let dir_path = dir.keep();
         dir_path.join(".devnpc.md")
     }
 
