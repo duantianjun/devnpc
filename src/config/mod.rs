@@ -91,10 +91,8 @@ impl Default for ReportConfig {
 }
 
 impl Config {
-    /// 加载配置 (P1 完整实现,P0 返回占位)
+    /// 加载配置 (env + .devnpc.md + 默认值三层合并)
     pub fn load() -> Result<Self> {
-        Err(crate::error::DevnpcError::Config(
-            "Config::load 尚未实现 - P1 将完成".into(),
-        ))
+        loader::load()
     }
 }
