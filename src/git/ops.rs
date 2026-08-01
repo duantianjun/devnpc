@@ -108,9 +108,11 @@ impl GitOps {
         self.run_git_cmd(&["ls-tree".into(), "HEAD".into()])
     }
 
-    /// ls-tree HEAD <path> (指定子目录,非递归)
+    /// ls-tree HEAD <path>/ (指定子目录,非递归,展开目录内容)
+    /// 尾斜杠确保展开目录内容而非返回目录本身;path 相对仓库根
     pub fn ls_tree_subdir(&self, subdir: &str) -> Result<String> {
-        self.run_git_cmd(&["ls-tree".into(), "HEAD".into(), subdir.into()])
+        let path_arg = format!("{subdir}/");
+        self.run_git_cmd(&["ls-tree".into(), "HEAD".into(), path_arg])
     }
 }
 
