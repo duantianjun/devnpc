@@ -1,0 +1,55 @@
+[package]
+name = "devnpc"
+version = "0.1.0"
+edition = "2024"
+description = "企业级研发流程 AI 智能体，对标 CodeBuddy NPC，对接 GitLab 全链路"
+license = "MIT"
+
+[[bin]]
+name = "devnpc"
+path = "src/main.rs"
+
+[lib]
+name = "devnpc"
+path = "src/lib.rs"
+
+[dependencies]
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+
+# HTTP 客户端（GitLab REST API v4 直连，使用 rustls 避免 OpenSSL 依赖）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# GitLab 类型辅助依赖（响应对 gitlab 库的依赖要求，复用其成熟类型定义）
+gitlab = "0.1902"
+
+# OpenAI 兼容协议客户端（支持 OpenAI / GLM / DeepSeek / Kimi 等）
+async-openai = "0.27"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# 日志与错误
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+
+# 工具
+url = "2"
+percent-encoding = "2"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+dotenvy = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
