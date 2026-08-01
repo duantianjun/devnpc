@@ -45,6 +45,12 @@ pub enum DevnpcError {
     #[error("路径越界: {path} 不在 workspace 内")]
     PathTraversal { path: String },
 
+    #[error("GitLab API 请求失败: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("YAML 解析错误: {0}")]
+    Yaml(#[from] serde_yaml::Error),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
