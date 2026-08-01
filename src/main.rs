@@ -61,8 +61,46 @@ fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
 }
 
 fn print_config() -> Result<()> {
-    println!("devnpc P0 骨架 - 配置加载待 P1 实现");
-    Ok(())
+    match devnpc::config::Config::load() {
+        Ok(config) => {
+            println!("=== devnpc 配置 ===");
+            println!("LLM:");
+            println!("  base_url: {}", config.llm.base_url);
+            println!("  model: {}", config.llm.model);
+            println!(
+                "  api_key: {}***",
+                config.llm.api_key.chars().take(4).collect::<String>()
+            );
+            println!("GitLab:");
+            println!("  url: {}", config.gitlab.url);
+            println!("  project_id: {}", config.gitlab.project_id);
+            println!("Limits:");
+            println!("  max_iterations: {}", config.limits.max_iterations);
+            println!("  max_ci_retries: {}", config.limits.max_ci_retries);
+            println!("Project:");
+            println!("  sop_mode: {:?}", config.project.sop_mode);
+            println!("  branch_prefix: {}", config.project.branch_prefix);
+            println!(
+                "  forbidden_paths: {:?}",
+                config.project.forbidden_paths
+            );
+            println!(
+                "  required_checks: {:?}",
+                config.project.required_checks
+            );
+            println!(
+                "  guidelines_markdown_len: {}",
+                config.project.guidelines_markdown.len()
+            );
+            println!("Report:");
+            println!("  target: {:?}", config.report.target);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("配置加载失败: {e}");
+            Err(e)
+        }
+    }
 }
 
 fn print_info() {
