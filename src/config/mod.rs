@@ -73,7 +73,7 @@ pub struct ReportConfig {
     pub target: ReportTarget,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ReportTarget {
     Artifact,
