@@ -223,4 +223,191 @@ mod tests {
             crate::error::DevnpcError::GitlabNotFound { .. }
         ));
     }
+
+    #[tokio::test]
+    async fn get_mr_returns_parsed_mr() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/merge_requests/7"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "iid": 7,
+                "title": "feat: add login",
+                "description": "实现登录",
+                "state": "opened",
+                "source_branch": "npc/1-login",
+                "target_branch": "main",
+                "web_url": "https://gitlab.test.com/mrs/7",
+                "draft": false,
+                "work_in_progress": false
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let mr = client.get_mr(1, 7).await.unwrap();
+        assert_eq!(mr.iid, 7);
+        assert_eq!(mr.source_branch, "npc/1-login");
+        assert_eq!(mr.target_branch, "main");
+        assert!(!mr.draft);
+    }
+
+    #[tokio::test]
+    async fn create_mr_posts_form_and_returns_mr() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v4/projects/1/merge_requests"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .and(wiremock::matchers::body_string_contains(
+                "source_branch=npc%2F1-login",
+            ))
+            .and(wiremock::matchers::body_string_contains("target_branch=main"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "iid": 8,
+                "title": "Draft: feat: login",
+                "description": "desc",
+                "state": "opened",
+                "source_branch": "npc/1-login",
+                "target_branch": "main",
+                "web_url": "https://gitlab.test.com/mrs/8",
+                "draft": true,
+                "work_in_progress": true
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let req = CreateMrReq {
+            source_branch: "npc/1-login".into(),
+            target_branch: "main".into(),
+            title: "feat: login".into(),
+            description: "desc".into(),
+            draft: true,
+        };
+        let mr = client.create_mr(1, req).await.unwrap();
+        assert_eq!(mr.iid, 8);
+        assert!(mr.draft);
+    }
+
+    #[tokio::test]
+    async fn get_mr_returns_api_error_on_500() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_mr(1, 1).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::DevnpcError::GitlabApi { status: 500, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_pipelines_returns_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/pipelines"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 100, "status": "success", "ref": "main", "sha": "abc123", "web_url": "https://gl.test/p/100" },
+                { "id": 101, "status": "failed", "ref": "npc/1-x", "sha": "def456", "web_url": "https://gl.test/p/101" }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let pipelines = client.get_pipelines(1).await.unwrap();
+        assert_eq!(pipelines.len(), 2);
+        assert_eq!(pipelines[0].id, 100);
+        assert_eq!(pipelines[0].status, "success");
+        assert_eq!(pipelines[0].ref_.as_deref(), Some("main"));
+        assert_eq!(pipelines[1].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn get_issue_notes_returns_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/issues/42/notes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1,
+                    "body": "@devnpc 修复登录",
+                    "author": { "id": 10, "username": "alice", "name": "Alice" },
+                    "created_at": "2026-08-01T10:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let notes = client.get_issue_notes(1, 42).await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].body, "@devnpc 修复登录");
+        assert_eq!(notes[0].author.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn get_mr_notes_returns_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/merge_requests/7/notes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 5,
+                    "body": "CI 通过",
+                    "author": { "id": 11, "username": "bob", "name": "Bob" },
+                    "created_at": "2026-08-01T11:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let notes = client.get_mr_notes(1, 7).await.unwrap();
+        assert_eq!(notes[0].author.name, "Bob");
+    }
+
+    #[tokio::test]
+    async fn create_mr_note_posts_body_and_returns_note() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v4/projects/1/merge_requests/7/notes"))
+            .and(wiremock::matchers::body_string_contains(
+                "body=CI+%E9%80%9A%E8%BF%87",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 9,
+                "body": "CI 通过",
+                "author": { "id": 99, "username": "devnpc", "name": "devnpc bot" },
+                "created_at": "2026-08-01T12:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let note = client.create_mr_note(1, 7, "CI 通过").await.unwrap();
+        assert_eq!(note.id, 9);
+        assert_eq!(note.author.username, "devnpc");
+    }
+
+    #[tokio::test]
+    async fn get_pipelines_returns_not_found_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/999/pipelines"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_pipelines(999).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::DevnpcError::GitlabNotFound { .. }
+        ));
+    }
 }
