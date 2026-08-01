@@ -36,7 +36,7 @@ impl LlmClient {
 
         // OpenAI 协议要求 tools 元素为 {"type":"function","function":{...}}
         let wrapped: Vec<ToolWrapper> =
-            tools.iter().map(|t| ToolWrapper::from(t)).collect();
+            tools.iter().map(ToolWrapper::from).collect();
         let body = ChatCompletionsReq {
             model: &self.config.model,
             messages,

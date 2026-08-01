@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::error::{DevnpcError, Result};
-use crate::gitlab_api::{GitlabApi, Note};
+use crate::gitlab_api::GitlabApi;
 use crate::tools::{Tool, ToolResult};
 
 pub struct CreateMrNoteTool {
@@ -68,7 +68,7 @@ impl Tool for CreateMrNoteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gitlab_api::{CreateMrReq, Issue, MergeRequest, NoteAuthor, Pipeline};
+    use crate::gitlab_api::{CreateMrReq, Issue, MergeRequest, Note, NoteAuthor, Pipeline};
     use async_trait::async_trait;
 
     struct MockGitlab {

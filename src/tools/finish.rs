@@ -72,6 +72,6 @@ mod tests {
 
     #[test]
     fn finish_default_constructs() {
-        let _tool = FinishTool::default();
+        let _tool = FinishTool;
     }
 }
