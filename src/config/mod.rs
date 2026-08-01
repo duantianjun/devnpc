@@ -65,6 +65,7 @@ pub struct ProjectConfig {
     pub forbidden_paths: Vec<String>,
     pub required_checks: Vec<String>,
     pub branch_prefix: String,
+    pub max_ci_retries: Option<u8>,
     pub guidelines_markdown: String,
 }
 
