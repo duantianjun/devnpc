@@ -1,8 +1,8 @@
 [package]
 name = "devnpc"
 version = "0.1.0"
-edition = "2024"
-description = "企业级研发流程 AI 智能体，对标 CodeBuddy NPC，对接 GitLab 全链路"
+edition = "2021"
+description = "基于 GitLab 的企业级研发流程 AI 智能体"
 license = "MIT"
 
 [[bin]]
@@ -16,17 +16,17 @@ path = "src/lib.rs"
 [dependencies]
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 
-# HTTP 客户端（GitLab REST API v4 直连，使用 rustls 避免 OpenSSL 依赖）
+# HTTP / GitLab API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# GitLab 类型辅助依赖（响应对 gitlab 库的依赖要求，复用其成熟类型定义）
-gitlab = "0.1902"
+# LLM 抽象层 (第 1 层: agent 用 rig)
+rig-core = "0.41"
 
-# OpenAI 兼容协议客户端（支持 OpenAI / GLM / DeepSeek / Kimi 等）
-async-openai = "0.27"
+# 代码感知工具 (第 2 层: tools/file_io 用 AFT)
+agent-file-tools = "0.49"
+tree-sitter = "0.26"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
@@ -42,12 +42,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 
+# 报告 (编译期 HTML 模板)
+askama = "0.12"
+
 # 工具
 url = "2"
-percent-encoding = "2"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 dotenvy = "0.15"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3
