@@ -49,17 +49,12 @@ impl Default for Limits {
 }
 
 /// SOP 约束模式
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SopMode {
+    #[default]
     Soft,
     Strict,
-}
-
-impl Default for SopMode {
-    fn default() -> Self {
-        Self::Soft
-    }
 }
 
 /// .devnpc.md 解析结果
