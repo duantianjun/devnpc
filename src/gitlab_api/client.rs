@@ -111,6 +111,20 @@ impl GitlabClient {
             self.base_url, project_id
         )
     }
+
+    fn related_mrs_url(&self, project_id: u64, issue_iid: u64) -> String {
+        format!(
+            "{}/api/v4/projects/{}/issues/{}/related_merge_requests",
+            self.base_url, project_id, issue_iid
+        )
+    }
+
+    fn pipelines_url_with_limit(&self, project_id: u64, count: usize) -> String {
+        format!(
+            "{}/api/v4/projects/{}/pipelines?per_page={}",
+            self.base_url, project_id, count
+        )
+    }
 }
 
 #[async_trait]
@@ -166,6 +180,16 @@ impl GitlabApi for GitlabClient {
     async fn create_mr_note(&self, project_id: u64, mr_iid: u64, body: &str) -> Result<Note> {
         let url = self.mr_notes_url(project_id, mr_iid);
         self.post(&url, &[("body", body)]).await
+    }
+
+    async fn get_related_mrs(&self, project_id: u64, issue_iid: u64) -> Result<Vec<MergeRequest>> {
+        let url = self.related_mrs_url(project_id, issue_iid);
+        self.get(&url).await
+    }
+
+    async fn get_recent_pipelines(&self, project_id: u64, count: usize) -> Result<Vec<Pipeline>> {
+        let url = self.pipelines_url_with_limit(project_id, count);
+        self.get(&url).await
     }
 }
 
@@ -409,5 +433,52 @@ mod tests {
             err,
             crate::error::DevnpcError::GitlabNotFound { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn get_related_mrs_returns_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/issues/42/related_merge_requests"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "iid": 7,
+                    "title": "feat: login",
+                    "description": "实现登录",
+                    "state": "merged",
+                    "source_branch": "npc/1-login",
+                    "target_branch": "main",
+                    "web_url": "https://gl.test/mrs/7",
+                    "draft": false
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let mrs = client.get_related_mrs(1, 42).await.unwrap();
+        assert_eq!(mrs.len(), 1);
+        assert_eq!(mrs[0].iid, 7);
+        assert_eq!(mrs[0].state, "merged");
+    }
+
+    #[tokio::test]
+    async fn get_recent_pipelines_returns_limited_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/pipelines"))
+            .and(wiremock::matchers::query_param("per_page", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 101, "status": "failed", "ref": "main", "sha": "abc", "web_url": "https://gl.test/p/101" }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let pipelines = client.get_recent_pipelines(1, 5).await.unwrap();
+        assert_eq!(pipelines.len(), 1);
+        assert_eq!(pipelines[0].id, 101);
+        assert_eq!(pipelines[0].status, "failed");
     }
 }

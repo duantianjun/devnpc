@@ -22,6 +22,8 @@ pub trait GitlabApi: Send + Sync {
     async fn get_issue_notes(&self, project_id: u64, iid: u64) -> Result<Vec<Note>>;
     async fn get_mr_notes(&self, project_id: u64, iid: u64) -> Result<Vec<Note>>;
     async fn create_mr_note(&self, project_id: u64, mr_iid: u64, body: &str) -> Result<Note>;
+    async fn get_related_mrs(&self, project_id: u64, issue_iid: u64) -> Result<Vec<MergeRequest>>;
+    async fn get_recent_pipelines(&self, project_id: u64, count: usize) -> Result<Vec<Pipeline>>;
 }
 
 // === 数据模型 ===
