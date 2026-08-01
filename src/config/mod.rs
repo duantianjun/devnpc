@@ -1,5 +1,6 @@
 //! 配置系统: 三层来源 (env > .devnpc.md > 内置)
 
+pub mod devnpc_md;
 pub mod env;
 pub mod loader;
 
