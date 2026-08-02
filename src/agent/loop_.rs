@@ -155,32 +155,32 @@ impl ReactLoop {
                 .collect();
             let tool_results = futures::future::join_all(tool_futures).await;
 
-            for (tc_id, tc_name, result) in tool_results {
+            for (tc_id, tc_name, result) in &tool_results {
                 let output = match &result {
                     Ok(r) => {
-                        trajectory.record_tool_call(&tc_name, r.success);
+                        trajectory.record_tool_call(tc_name, r.success);
                         r.output.clone()
                     }
                     Err(e) => {
-                        trajectory.record_tool_call(&tc_name, false);
+                        trajectory.record_tool_call(tc_name, false);
                         format!("错误: {e}")
                     }
                 };
 
                 // finish 工具: 提取 summary
-                if tc_name == "finish" {
+                if tc_name.as_str() == "finish" {
                     finish_summary = Some(
                         // 从原始参数中提取 summary
                         tool_calls
                             .iter()
-                            .find(|tc| tc.id == tc_id)
+                            .find(|tc| tc.id == *tc_id)
                             .and_then(|tc| tc.arguments["summary"].as_str())
                             .unwrap_or(&output)
                             .to_string(),
                     );
                 }
 
-                messages.push(Message::tool(&tc_id, output));
+                messages.push(Message::tool(tc_id.clone(), output));
             }
 
             // 若调了 finish,终止
