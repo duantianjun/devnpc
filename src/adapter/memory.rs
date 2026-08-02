@@ -205,81 +205,116 @@ impl MemoryStore {
 
         let mut results = Vec::new();
 
-        // 搜索任务记录: 匹配任务描述中的关键词
-        for kw in &keywords {
-            let pattern = format!("%{}%", kw);
-            let mut stmt = conn
-                .prepare(
-                    "SELECT task_description, result_summary, modified_files,
-                            duration_secs, success, created_at
-                     FROM task_records
-                     WHERE task_description LIKE ?1
-                     ORDER BY created_at DESC
-                     LIMIT 3",
-                )
-                .map_err(|e| {
-                    crate::error::DevnpcError::Sqlite(format!("查询准备失败: {e}"))
-                })?;
+        // 搜索任务记录: 匹配任务描述中任一关键词 (单条 SQL,避免 N 次循环查询)
+        // 动态构造占位符列表: WHERE task_description LIKE ?1 OR task_description LIKE ?2 OR ...
+        let patterns: Vec<String> = keywords.iter().map(|kw| format!("%{kw}%")).collect();
+        let placeholders: Vec<String> = (1..=patterns.len())
+            .map(|i| format!("task_description LIKE ?{i}"))
+            .collect();
+        let sql = format!(
+            "SELECT task_description, result_summary, modified_files,
+                    duration_secs, success, created_at
+             FROM task_records
+             WHERE {}
+             ORDER BY created_at DESC
+             LIMIT 10",
+            placeholders.join(" OR ")
+        );
 
-            let rows = stmt
-                .query_map(rusqlite::params![&pattern], |row| {
-                    let desc: String = row.get(0)?;
-                    let summary: String = row.get(1)?;
-                    let files: String = row.get(2)?;
-                    let duration: i64 = row.get(3)?;
-                    let success: i64 = row.get(4)?;
-                    let created: String = row.get(5)?;
-                    Ok(format!(
-                        "[任务] {created} | {desc}\n  结果: {summary}\n  文件: {files}\n  耗时: {duration}s | 状态: {}",
-                        if success == 1 { "✓" } else { "✗" }
-                    ))
-                })
-                .map_err(|e| {
-                    crate::error::DevnpcError::Sqlite(format!("查询执行失败: {e}"))
-                })?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| crate::error::DevnpcError::Sqlite(format!("查询准备失败: {e}")))?;
 
-            for row in rows.flatten() {
-                if !results.contains(&row) {
-                    results.push(row);
+        let params: Vec<&dyn rusqlite::ToSql> = patterns
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                let desc: String = row.get(0)?;
+                let summary: String = row.get(1)?;
+                let files: String = row.get(2)?;
+                let duration: i64 = row.get(3)?;
+                let success: i64 = row.get(4)?;
+                let created: String = row.get(5)?;
+                Ok(format!(
+                    "[任务] {created} | {desc}\n  结果: {summary}\n  文件: {files}\n  耗时: {duration}s | 状态: {}",
+                    if success == 1 { "✓" } else { "✗" }
+                ))
+            })
+            .map_err(|e| {
+                crate::error::DevnpcError::Sqlite(format!("查询执行失败: {e}"))
+            })?;
+
+        for row in rows {
+            match row {
+                Ok(r) => {
+                    if !results.contains(&r) {
+                        results.push(r);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "task_records 行反序列化失败,跳过");
                 }
             }
         }
 
-        // 搜索修复经验: 匹配失败类型或错误消息
-        for kw in &keywords {
-            let pattern = format!("%{}%", kw);
-            let mut stmt = conn
-                .prepare(
-                    "SELECT failure_type, error_message, root_cause, fix_method, success, created_at
-                     FROM fix_experiences
-                     WHERE failure_type LIKE ?1 OR error_message LIKE ?1
-                     ORDER BY created_at DESC
-                     LIMIT 3",
-                )
-                .map_err(|e| {
-                    crate::error::DevnpcError::Sqlite(format!("查询准备失败: {e}"))
-                })?;
+        // 搜索修复经验: 匹配失败类型或错误消息 (单条 SQL,每个关键字 OR failure_type LIKE ?N OR error_message LIKE ?N+1)
+        let placeholders: Vec<String> = (0..patterns.len())
+            .flat_map(|i| {
+                let n = i * 2 + 1;
+                vec![
+                    format!("failure_type LIKE ?{n}"),
+                    format!("error_message LIKE ?{}", n + 1),
+                ]
+            })
+            .collect();
+        let exp_params: Vec<String> = patterns
+            .iter()
+            .flat_map(|p| vec![p.clone(), p.clone()])
+            .collect();
+        let sql = format!(
+            "SELECT failure_type, error_message, root_cause, fix_method, success, created_at
+             FROM fix_experiences
+             WHERE {}
+             ORDER BY created_at DESC
+             LIMIT 10",
+            placeholders.join(" OR ")
+        );
 
-            let rows = stmt
-                .query_map(rusqlite::params![&pattern], |row| {
-                    let ftype: String = row.get(0)?;
-                    let errmsg: String = row.get(1)?;
-                    let cause: String = row.get(2)?;
-                    let fix: String = row.get(3)?;
-                    let success: i64 = row.get(4)?;
-                    let created: String = row.get(5)?;
-                    Ok(format!(
-                        "[修复] {created} | {ftype}\n  错误: {errmsg}\n  根因: {cause}\n  修复: {fix}\n  状态: {}",
-                        if success == 1 { "✓" } else { "✗" }
-                    ))
-                })
-                .map_err(|e| {
-                    crate::error::DevnpcError::Sqlite(format!("查询执行失败: {e}"))
-                })?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| crate::error::DevnpcError::Sqlite(format!("查询准备失败: {e}")))?;
+        let params: Vec<&dyn rusqlite::ToSql> = exp_params
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                let ftype: String = row.get(0)?;
+                let errmsg: String = row.get(1)?;
+                let cause: String = row.get(2)?;
+                let fix: String = row.get(3)?;
+                let success: i64 = row.get(4)?;
+                let created: String = row.get(5)?;
+                Ok(format!(
+                    "[修复] {created} | {ftype}\n  错误: {errmsg}\n  根因: {cause}\n  修复: {fix}\n  状态: {}",
+                    if success == 1 { "✓" } else { "✗" }
+                ))
+            })
+            .map_err(|e| {
+                crate::error::DevnpcError::Sqlite(format!("查询执行失败: {e}"))
+            })?;
 
-            for row in rows.flatten() {
-                if !results.contains(&row) {
-                    results.push(row);
+        for row in rows {
+            match row {
+                Ok(r) => {
+                    if !results.contains(&r) {
+                        results.push(r);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "fix_experiences 行反序列化失败,跳过");
                 }
             }
         }

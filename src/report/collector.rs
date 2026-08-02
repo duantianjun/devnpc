@@ -266,6 +266,14 @@ impl TrajectoryCollector {
                 None,
                 None,
             ),
+            CiOutcome::Error { mr_iid, reason } => (
+                format!("error: {reason}"),
+                Some(*mr_iid),
+                None,
+                0,
+                None,
+                None,
+            ),
         };
 
         ReportData {

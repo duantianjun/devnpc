@@ -3,7 +3,7 @@
 //! 统一封装 GET/POST,处理状态码与错误。
 
 use async_trait::async_trait;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 
 use crate::error::{DevnpcError, Result};
 
@@ -27,27 +27,51 @@ impl GitlabClient {
         }
     }
 
-    /// 发 GET 请求,返回反序列化的 JSON。
-    /// 404 返回 GitlabNotFound,其他非 2xx 返回 GitlabApi。
-    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let resp = self
-            .http
-            .get(url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .send()
-            .await?;
+    /// 校验响应状态码,失败时消费 resp 并提取错误体。
+    ///
+    /// - 404 → `GitlabNotFound` (携带响应体作为 resource)
+    /// - 其他非 2xx → `GitlabApi` (携带 status + body)
+    /// - 2xx → 返回 resp 供调用方继续读取 body
+    async fn ensure_success(&self, resp: reqwest::Response) -> Result<reqwest::Response> {
         let status = resp.status();
         if status == StatusCode::NOT_FOUND {
             let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabNotFound { resource: body });
-        }
-        if !status.is_success() {
+            Err(DevnpcError::GitlabNotFound { resource: body })
+        } else if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabApi {
+            Err(DevnpcError::GitlabApi {
                 status: status.as_u16(),
                 body,
-            });
+            })
+        } else {
+            Ok(resp)
         }
+    }
+
+    /// 通用请求构建 + 发送 + 状态校验。
+    ///
+    /// 自动注入 `PRIVATE-TOKEN` 头,可选附加 form 表单,发送后统一校验状态码。
+    /// 成功时返回已校验的 `reqwest::Response`,由调用方决定按 JSON 还是 text 读取。
+    async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        form: Option<&[(&str, &str)]>,
+    ) -> Result<reqwest::Response> {
+        let mut req = self
+            .http
+            .request(method, url)
+            .header("PRIVATE-TOKEN", &self.token);
+        if let Some(form) = form {
+            req = req.form(form);
+        }
+        let resp = req.send().await?;
+        self.ensure_success(resp).await
+    }
+
+    /// 发 GET 请求,返回反序列化的 JSON。
+    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let resp = self.send(Method::GET, url, None).await?;
         Ok(resp.json::<T>().await?)
     }
 
@@ -57,48 +81,13 @@ impl GitlabClient {
         url: &str,
         form: &[(&str, &str)],
     ) -> Result<T> {
-        let resp = self
-            .http
-            .put(url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .form(form)
-            .send()
-            .await?;
-        let status = resp.status();
-        if status == StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabNotFound { resource: body });
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabApi {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let resp = self.send(Method::PUT, url, Some(form)).await?;
         Ok(resp.json::<T>().await?)
     }
 
     /// 发 GET 请求,返回原始文本 (用于 job 日志)
     async fn get_raw(&self, url: &str) -> Result<String> {
-        let resp = self
-            .http
-            .get(url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .send()
-            .await?;
-        let status = resp.status();
-        if status == StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabNotFound { resource: body });
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabApi {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let resp = self.send(Method::GET, url, None).await?;
         Ok(resp.text().await?)
     }
 
@@ -108,25 +97,7 @@ impl GitlabClient {
         url: &str,
         form: &[(&str, &str)],
     ) -> Result<T> {
-        let resp = self
-            .http
-            .post(url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .form(form)
-            .send()
-            .await?;
-        let status = resp.status();
-        if status == StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabNotFound { resource: body });
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DevnpcError::GitlabApi {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let resp = self.send(Method::POST, url, Some(form)).await?;
         Ok(resp.json::<T>().await?)
     }
 

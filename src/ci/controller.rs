@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::time::sleep;
 
-use crate::ci::log_parser::{parse_log, ParsedFailure};
+use crate::ci::log_parser::{parse_log, FailureType, ParsedFailure};
 use crate::config::CiConfig;
 use crate::error::{DevnpcError, Result};
 use crate::git::ops::GitOps;
@@ -18,6 +18,11 @@ pub enum CiOutcome {
     Passed { mr_iid: u64, pipeline_id: u64, attempts: u8 },
     Failed { mr_iid: u64, last_error: String, attempts: u8 },
     Timeout { mr_iid: u64, stage: String },
+    /// CI 闭环本身出现异常 (控制器运行失败、MR 创建失败等)
+    ///
+    /// 与 `Failed` 区别:`Failed` 是 CI 真正跑失败后的最终状态,
+    /// `Error` 是 CI 还没跑起来或控制器异常,不应被报告为"通过"。
+    Error { mr_iid: u64, reason: String },
 }
 
 /// 修复处理器: 外部注入,负责根据 CI 失败信息驱动 agent 修复代码
@@ -278,14 +283,42 @@ impl CiController {
         }
 
         let mut all_failures = Vec::new();
+        let mut log_fetch_failures = 0u32;
         for job in &failed_jobs {
-            let log = self
-                .gitlab
-                .get_job_log(self.project_id, job.id)
-                .await
-                .unwrap_or_else(|_| format!("[无法获取 job #{} 日志]", job.id));
-            let failures = parse_log(&job.name, &log);
-            all_failures.extend(failures);
+            match self.gitlab.get_job_log(self.project_id, job.id).await {
+                Ok(log) => {
+                    let failures = parse_log(&job.name, &log);
+                    all_failures.extend(failures);
+                }
+                Err(e) => {
+                    log_fetch_failures += 1;
+                    tracing::warn!(
+                        job_id = job.id,
+                        job_name = %job.name,
+                        error = %e,
+                        "拉取 job 日志失败"
+                    );
+                    // 仍把 job 名作为失败信息记入,保证 fix_agent 能看到该 job 失败
+                    all_failures.push(ParsedFailure {
+                        failure_type: FailureType::Other,
+                        job_name: job.name.clone(),
+                        file: None,
+                        line: None,
+                        error_message: format!(
+                            "[无法获取 job {} ({}) 日志: {e}]",
+                            job.id, job.name
+                        ),
+                        context_lines: vec![format!("job: {}", job.name)],
+                    });
+                }
+            }
+        }
+
+        // 所有日志都拉取失败 → 视为修复链路异常
+        if log_fetch_failures as usize == failed_jobs.len() {
+            return Err(DevnpcError::CiFixExhausted {
+                attempts: attempt,
+            });
         }
 
         if all_failures.is_empty() {
@@ -325,6 +358,7 @@ impl CiController {
             DevnpcError::GitCommand {
                 cmd: format!("git push origin {branch}"),
                 code: -1,
+                stderr: e.to_string(),
             }
         })?;
 

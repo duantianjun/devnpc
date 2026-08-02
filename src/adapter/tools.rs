@@ -352,7 +352,8 @@ fn create_mr_note_tool(gitlab: Arc<dyn GitlabApi>, project_id: u64) -> FunctionT
 }
 
 // ============================================================
-// AFT 代码感知工具 (基于 tree-sitter, 支持 Rust + Java + Python + JS/TS + Go + C/C++)
+// AFT 代码感知工具 (基于 tree-sitter, 支持 13 种语言:
+// Rust + Java + Python + JS/TS + Go + C/C++ + Ruby + PHP + Swift + Kotlin)
 // ============================================================
 
 /// 支持的语言
@@ -367,11 +368,15 @@ enum Language {
     Go,
     C,
     Cpp,
+    Ruby,
+    Php,
+    Swift,
+    Kotlin,
 }
 
 /// 根据文件扩展名检测语言
 fn detect_language(path: &std::path::Path) -> Option<Language> {
-    match path.extension()?.to_str()? {
+    match path.extension()?.to_str()?.to_lowercase().as_str() {
         "rs" => Some(Language::Rust),
         "java" => Some(Language::Java),
         "py" => Some(Language::Python),
@@ -381,6 +386,10 @@ fn detect_language(path: &std::path::Path) -> Option<Language> {
         "go" => Some(Language::Go),
         "c" | "h" => Some(Language::C),
         "cpp" | "hpp" | "cc" | "cxx" => Some(Language::Cpp),
+        "rb" => Some(Language::Ruby),
+        "php" => Some(Language::Php),
+        "swift" => Some(Language::Swift),
+        "kt" | "kts" => Some(Language::Kotlin),
         _ => None,
     }
 }
@@ -397,6 +406,10 @@ fn get_language(lang: Language) -> tree_sitter::Language {
         Language::Go => tree_sitter_go::LANGUAGE.into(),
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+        Language::Swift => tree_sitter_swift::LANGUAGE.into(),
+        Language::Kotlin => tree_sitter_kotlin_sg::LANGUAGE.into(),
     }
 }
 
@@ -433,6 +446,25 @@ fn interesting_kinds(lang: Language) -> &'static [&'static str] {
             "function_definition", "class_specifier", "struct_specifier",
             "union_specifier", "enum_specifier", "type_definition",
         ],
+        // Ruby: method / class / module 定义
+        Language::Ruby => &[
+            "method", "class", "module", "singleton_method",
+        ],
+        // PHP: 函数 / 类 / 接口定义
+        Language::Php => &[
+            "function_definition", "class_declaration", "interface_declaration",
+            "trait_declaration", "enum_declaration",
+        ],
+        // Swift: 函数 / 类 / 结构体 / 协议 / 枚举定义
+        Language::Swift => &[
+            "function_declaration", "class_declaration", "struct_declaration",
+            "protocol_declaration", "enum_declaration",
+        ],
+        // Kotlin: 函数 / 类 / 接口 / 对象定义
+        Language::Kotlin => &[
+            "function_declaration", "class_declaration", "interface_declaration",
+            "object_declaration", "enum_declaration",
+        ],
     }
 }
 
@@ -451,6 +483,10 @@ fn parse_source(source: &str, lang: Language) -> std::result::Result<tree_sitter
         static GO_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
         static C_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
         static CPP_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static RUBY_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static PHP_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static SWIFT_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static KOTLIN_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
     }
     let parser_cell = match lang {
         Language::Rust => &RUST_PARSER,
@@ -462,6 +498,10 @@ fn parse_source(source: &str, lang: Language) -> std::result::Result<tree_sitter
         Language::Go => &GO_PARSER,
         Language::C => &C_PARSER,
         Language::Cpp => &CPP_PARSER,
+        Language::Ruby => &RUBY_PARSER,
+        Language::Php => &PHP_PARSER,
+        Language::Swift => &SWIFT_PARSER,
+        Language::Kotlin => &KOTLIN_PARSER,
     };
     parser_cell.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -886,6 +926,21 @@ mod tests {
         assert_eq!(detect_language(std::path::Path::new("j.cpp")), Some(Language::Cpp));
         assert_eq!(detect_language(std::path::Path::new("k.hpp")), Some(Language::Cpp));
         assert_eq!(detect_language(std::path::Path::new("l.cc")), Some(Language::Cpp));
+        // 新增语言 (Ruby/PHP/Swift/Kotlin)
+        assert_eq!(detect_language(std::path::Path::new("m.rb")), Some(Language::Ruby));
+        assert_eq!(detect_language(std::path::Path::new("n.php")), Some(Language::Php));
+        assert_eq!(detect_language(std::path::Path::new("o.swift")), Some(Language::Swift));
+        assert_eq!(detect_language(std::path::Path::new("p.kt")), Some(Language::Kotlin));
+        assert_eq!(detect_language(std::path::Path::new("q.kts")), Some(Language::Kotlin));
+    }
+
+    #[test]
+    fn detect_language_is_case_insensitive_for_extensions() {
+        // 扩展名大小写不敏感 (macOS/Windows 文件系统)
+        assert_eq!(detect_language(std::path::Path::new("a.RB")), Some(Language::Ruby));
+        assert_eq!(detect_language(std::path::Path::new("b.PHP")), Some(Language::Php));
+        assert_eq!(detect_language(std::path::Path::new("c.SWIFT")), Some(Language::Swift));
+        assert_eq!(detect_language(std::path::Path::new("d.KT")), Some(Language::Kotlin));
     }
 
     #[test]
@@ -908,6 +963,42 @@ mod tests {
     fn parse_source_handles_empty_input() {
         let result = parse_source("", Language::Rust);
         assert!(result.is_ok(), "空输入应可解析");
+    }
+
+    #[test]
+    fn parse_source_succeeds_for_ruby() {
+        let src = "def hello(name)\n  puts \"Hello, #{name}!\"\nend";
+        let result = parse_source(src, Language::Ruby);
+        assert!(result.is_ok(), "解析 Ruby 应成功: {:?}", result.err());
+        let tree = result.unwrap();
+        assert!(!tree.root_node().has_error(), "Ruby 解析结果不应有语法错误");
+    }
+
+    #[test]
+    fn parse_source_succeeds_for_php() {
+        let src = "<?php\nfunction greet($name) {\n  echo \"Hello, $name!\";\n}\n";
+        let result = parse_source(src, Language::Php);
+        assert!(result.is_ok(), "解析 PHP 应成功: {:?}", result.err());
+        let tree = result.unwrap();
+        assert!(!tree.root_node().has_error(), "PHP 解析结果不应有语法错误");
+    }
+
+    #[test]
+    fn parse_source_succeeds_for_swift() {
+        let src = "func greet(_ name: String) {\n  print(\"Hello, \\(name)!\")\n}";
+        let result = parse_source(src, Language::Swift);
+        assert!(result.is_ok(), "解析 Swift 应成功: {:?}", result.err());
+        let tree = result.unwrap();
+        assert!(!tree.root_node().has_error(), "Swift 解析结果不应有语法错误");
+    }
+
+    #[test]
+    fn parse_source_succeeds_for_kotlin() {
+        let src = "fun greet(name: String) {\n  println(\"Hello, $name!\")\n}";
+        let result = parse_source(src, Language::Kotlin);
+        assert!(result.is_ok(), "解析 Kotlin 应成功: {:?}", result.err());
+        let tree = result.unwrap();
+        assert!(!tree.root_node().has_error(), "Kotlin 解析结果不应有语法错误");
     }
 
     #[test]

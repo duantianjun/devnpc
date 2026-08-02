@@ -353,7 +353,12 @@ impl Orchestrator {
     /// 只统计非 partial 事件 (即每次 model call 的最终结果), 避免重复计数。
     fn accumulate_usage(&self, usage: Option<&UsageMetadata>) {
         let Some(u) = usage else { return };
-        let mut stats = self.usage_stats.lock().expect("usage_stats mutex poisoned");
+        // Mutex 中毒意味着持有锁的线程 panic,此时数据可能不一致但仍是可访问的,
+        // 不应让后续所有调用雪崩 panic。与 report/collector.rs 的 TrajectoryCollector 一致。
+        let mut stats = self
+            .usage_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         stats.input_tokens += u.prompt_token_count as i64;
         stats.output_tokens += u.candidates_token_count as i64;
         if let Some(cost) = u.cost {
@@ -364,13 +369,19 @@ impl Orchestrator {
 
     /// 取出累积的 token 使用统计 (drain), 用于报告
     pub fn take_usage_stats(&self) -> UsageStats {
-        let mut stats = self.usage_stats.lock().expect("usage_stats mutex poisoned");
+        let mut stats = self
+            .usage_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *stats)
     }
 
     /// 当前累积的 token 使用统计 (不 drain), 用于运行中查询
     pub fn usage_stats(&self) -> UsageStats {
-        let stats = self.usage_stats.lock().expect("usage_stats mutex poisoned");
+        let stats = self
+            .usage_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         stats.clone()
     }
 
@@ -418,22 +429,35 @@ impl Orchestrator {
             .map_err(|e| crate::error::DevnpcError::Config(format!("{app_name} 执行失败: {e}")))?;
 
         let mut result = String::new();
+        let mut err_count = 0u32;
         while let Some(event_result) = stream.next().await {
-            if let Ok(event) = event_result {
-                // 累积 usage (只统计非 partial 事件,避免重复计数)
-                if !event.llm_response.partial {
-                    self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
-                }
-                if event.is_final_response()
-                    && let Some(content) = &event.llm_response.content
-                {
-                    for part in &content.parts {
-                        if let Some(text) = part.text() {
-                            result.push_str(text);
+            match event_result {
+                Ok(event) => {
+                    // 累积 usage (只统计非 partial 事件,避免重复计数)
+                    if !event.llm_response.partial {
+                        self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
+                    }
+                    if event.is_final_response()
+                        && let Some(content) = &event.llm_response.content
+                    {
+                        for part in &content.parts {
+                            if let Some(text) = part.text() {
+                                result.push_str(text);
+                            }
                         }
                     }
                 }
+                Err(e) => {
+                    err_count += 1;
+                    tracing::warn!(error = %e, "子 Agent 流式事件错误");
+                }
             }
+        }
+
+        if err_count > 0 && result.is_empty() {
+            return Err(crate::error::DevnpcError::Llm(format!(
+                "子 Agent 流式执行全部失败 ({err_count} 个错误事件)"
+            )));
         }
 
         Ok(result)
@@ -479,21 +503,34 @@ impl Orchestrator {
             .map_err(|e| crate::error::DevnpcError::Config(format!("Agent 执行失败: {e}")))?;
 
         let mut final_text = String::new();
+        let mut err_count = 0u32;
         while let Some(event_result) = stream.next().await {
-            if let Ok(event) = event_result {
-                if !event.llm_response.partial {
-                    self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
-                }
-                if event.is_final_response()
-                    && let Some(content) = &event.llm_response.content
-                {
-                    for part in &content.parts {
-                        if let Some(text) = part.text() {
-                            final_text.push_str(text);
+            match event_result {
+                Ok(event) => {
+                    if !event.llm_response.partial {
+                        self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
+                    }
+                    if event.is_final_response()
+                        && let Some(content) = &event.llm_response.content
+                    {
+                        for part in &content.parts {
+                            if let Some(text) = part.text() {
+                                final_text.push_str(text);
+                            }
                         }
                     }
                 }
+                Err(e) => {
+                    err_count += 1;
+                    tracing::warn!(error = %e, "主 Agent 流式事件错误");
+                }
             }
+        }
+
+        if err_count > 0 && final_text.is_empty() {
+            return Err(crate::error::DevnpcError::Llm(format!(
+                "主 Agent 流式执行全部失败 ({err_count} 个错误事件)"
+            )));
         }
 
         Ok(final_text)

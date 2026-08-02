@@ -19,7 +19,7 @@ pub enum DevnpcError {
     GitlabNotFound { resource: String },
 
     #[error("Git 命令失败: {cmd} (exit {code})")]
-    GitCommand { cmd: String, code: i32 },
+    GitCommand { cmd: String, code: i32, stderr: String },
 
     #[error("分支保护: 不允许操作 {branch}")]
     BranchProtected { branch: String },

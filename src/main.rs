@@ -43,6 +43,17 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// 启动 Webhook 服务器,监听 GitLab 事件实时触发任务
+    Serve {
+        /// 监听端口 (覆盖 DEVNPC_WEBHOOK_PORT)
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// 监听地址 (覆盖 DEVNPC_WEBHOOK_HOST)
+        #[arg(long)]
+        host: Option<String>,
+    },
+
     /// 打印当前配置 (调试用)
     Config,
 
@@ -63,6 +74,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Run { task, dry_run }) => run(task.as_deref(), dry_run).await,
+        Some(Commands::Serve { port, host }) => serve(port, host).await,
         Some(Commands::Config) => print_config(),
         Some(Commands::Info) | None => {
             print_info();
@@ -79,6 +91,70 @@ const SYSTEM_INSTRUCTION: &str = "\
 2. 改完后用对应的构建工具验证编译 (如 cargo build / mvn compile / gradle build / npm run build 等)\n\
 3. 完成后总结你的工作成果\n\
 4. 禁止修改工作目录外的文件";
+
+/// Webhook 服务器模式
+///
+/// 启动 axum HTTP 服务器监听 GitLab webhook 事件。
+/// 收到 Note 事件中的 @devnpc 提及时,自动触发任务执行。
+///
+/// 与 `run` 命令的区别:
+/// - `run`: 单次执行 (CI 内调用或手动 --task)
+/// - `serve`: 长驻进程,实时响应 webhook 事件,适合部署在服务器上
+async fn serve(port_override: Option<u16>, host_override: Option<String>) -> Result<()> {
+    let mut config = Config::load()?;
+
+    // CLI 参数覆盖配置
+    if let Some(port) = port_override {
+        config.webhook.port = port;
+    }
+    if let Some(host) = host_override {
+        config.webhook.host = host;
+    }
+    config.webhook.enabled = true;
+
+    if config.webhook.secret.is_empty() {
+        tracing::warn!(
+            "DEVNPC_WEBHOOK_SECRET 未设置,GitLab webhook 将无 secret 校验 (生产环境建议配置)"
+        );
+    }
+
+    let (handle, mut receiver) = devnpc::trigger::webhook::start_server(&config.webhook)
+        .await
+        .map_err(|e| devnpc::error::DevnpcError::Config(format!("Webhook 服务器启动失败: {e}")))?;
+
+    tracing::info!("Webhook 服务器已启动,等待 GitLab 事件...");
+
+    // 主循环: 接收 webhook 触发事件,为每个任务启动独立的 run 执行
+    while let Some(trigger) = receiver.recv().await {
+        let task_desc = trigger.task.description.clone();
+        let task_kind = format!("{:?}", trigger.task.kind);
+        let target_iid = trigger.target_iid;
+        let source = trigger.source.clone();
+
+        tracing::info!(
+            source = %source,
+            target_iid = target_iid,
+            kind = %task_kind,
+            "收到 webhook 触发,启动任务执行"
+        );
+
+        // 在独立 task 中执行,不阻塞 webhook 接收
+        tokio::spawn(async move {
+            // 构造 --task 参数形式,复用 run 函数
+            if let Err(e) = run(Some(&task_desc), false).await {
+                tracing::error!(
+                    target_iid = target_iid,
+                    error = %e,
+                    "webhook 触发的任务执行失败"
+                );
+            }
+        });
+    }
+
+    // receiver 关闭 (send 端 drop) 时退出
+    let _ = handle.await;
+    Ok(())
+}
 
 /// 主运行流程 (基于 adk-rust):
 ///
@@ -519,13 +595,16 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
             tracing::info!("任务记录已持久化到长期记忆");
         }
 
-        // CI 失败经验持久化 (Failed/Timeout 时记录,便于后续同类问题检索)
+        // CI 失败经验持久化 (Failed/Timeout/Error 时记录,便于后续同类问题检索)
         let (should_save_exp, failure_type, error_msg) = match &ci_outcome {
             CiOutcome::Failed { last_error, .. } => {
                 (true, "CI失败".to_string(), last_error.clone())
             }
             CiOutcome::Timeout { stage, .. } => {
                 (true, "CI超时".to_string(), format!("阶段: {stage}"))
+            }
+            CiOutcome::Error { reason, .. } => {
+                (true, "CI异常".to_string(), reason.clone())
             }
             CiOutcome::Passed { .. } => (false, String::new(), String::new()),
         };
@@ -689,21 +768,19 @@ async fn run_ci_controller(
                     Ok(outcome)
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "CI 控制器运行失败,使用 fallback");
-                    Ok(CiOutcome::Passed {
+                    tracing::warn!(error = %e, "CI 控制器运行失败");
+                    Ok(CiOutcome::Error {
                         mr_iid: mr.iid,
-                        pipeline_id: 0,
-                        attempts: 0,
+                        reason: format!("CI 控制器运行失败: {e}"),
                     })
                 }
             }
         }
         Err(e) => {
             tracing::warn!(error = %e, "创建 MR 失败,可能已存在");
-            Ok(CiOutcome::Passed {
+            Ok(CiOutcome::Error {
                 mr_iid: 0,
-                pipeline_id: 0,
-                attempts: 0,
+                reason: format!("创建 MR 失败: {e}"),
             })
         }
     }
@@ -775,6 +852,14 @@ fn build_report(
         ),
         CiOutcome::Timeout { mr_iid, stage } => (
             format!("timeout: {stage}"),
+            Some(*mr_iid),
+            None,
+            0,
+            None,
+            None,
+        ),
+        CiOutcome::Error { mr_iid, reason } => (
+            format!("error: {reason}"),
             Some(*mr_iid),
             None,
             0,

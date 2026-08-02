@@ -51,6 +51,39 @@ const DEFAULT_PM_INSTRUCTION: &str = "\
 3. 定义任务优先级和依赖关系\n\
 4. 完成后在输出末尾追加信号标记: [SIGNAL:decomposed]";
 
+/// 通用 Agent 构建逻辑 (供 build_code_agent / build_fix_agent / build_review_agent /
+/// build_pm_agent 复用)
+///
+/// 统一的 3 层能力注入流程:
+/// 1. 选择基础指令 (role 优先,否则 default_instruction)
+/// 2. 注入 skill 指令
+/// 3. 按 role + skill 过滤工具
+fn build_agent_impl(
+    agent_name: &str,
+    default_instruction: &str,
+    tools: Vec<Arc<dyn Tool>>,
+    model: Arc<dyn adk_rust::Llm>,
+    role: Option<&Role>,
+    sop: Option<&Sop>,
+    skills: &[&Skill],
+) -> Result<adk_rust::agent::LlmAgent> {
+    let base_instruction = match role {
+        Some(r) => build_role_instruction(r, sop),
+        None => default_instruction.to_string(),
+    };
+    let instruction = inject_skills(&base_instruction, skills);
+    let role_filtered = filter_tools_by_role(tools, role);
+    let filtered_tools = filter_tools_by_skills(role_filtered, skills);
+
+    let builder = LlmAgentBuilder::new(agent_name)
+        .instruction(instruction)
+        .model(model);
+    let builder = filtered_tools.into_iter().fold(builder, |b, tool| b.tool(tool));
+    builder.build().map_err(|e| {
+        crate::error::DevnpcError::Config(format!("{} 构建失败: {e}", agent_name))
+    })
+}
+
 /// 构建 Code Agent - 代码读写、AST 操作、编译验证
 ///
 /// - 当 `role` 为 Some 时,使用 role.system_prompt + sop 组合指令,并按 role.tools 过滤工具
@@ -63,21 +96,7 @@ pub fn build_code_agent(
     sop: Option<&Sop>,
     skills: &[&Skill],
 ) -> Result<adk_rust::agent::LlmAgent> {
-    let base_instruction = match role {
-        Some(r) => build_role_instruction(r, sop),
-        None => DEFAULT_CODE_INSTRUCTION.to_string(),
-    };
-    let instruction = inject_skills(&base_instruction, skills);
-    let role_filtered = filter_tools_by_role(tools, role);
-    let filtered_tools = filter_tools_by_skills(role_filtered, skills);
-
-    let builder = LlmAgentBuilder::new("code_agent")
-        .instruction(instruction)
-        .model(model);
-    let builder = filtered_tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    builder.build().map_err(|e| {
-        crate::error::DevnpcError::Config(format!("Code Agent 构建失败: {e}"))
-    })
+    build_agent_impl("code_agent", DEFAULT_CODE_INSTRUCTION, tools, model, role, sop, skills)
 }
 
 /// 构建 Fix Agent - CI 日志分析、根因定位、修复代码
@@ -92,21 +111,7 @@ pub fn build_fix_agent(
     sop: Option<&Sop>,
     skills: &[&Skill],
 ) -> Result<adk_rust::agent::LlmAgent> {
-    let base_instruction = match role {
-        Some(r) => build_role_instruction(r, sop),
-        None => DEFAULT_FIX_INSTRUCTION.to_string(),
-    };
-    let instruction = inject_skills(&base_instruction, skills);
-    let role_filtered = filter_tools_by_role(tools, role);
-    let filtered_tools = filter_tools_by_skills(role_filtered, skills);
-
-    let builder = LlmAgentBuilder::new("fix_agent")
-        .instruction(instruction)
-        .model(model);
-    let builder = filtered_tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    builder.build().map_err(|e| {
-        crate::error::DevnpcError::Config(format!("Fix Agent 构建失败: {e}"))
-    })
+    build_agent_impl("fix_agent", DEFAULT_FIX_INSTRUCTION, tools, model, role, sop, skills)
 }
 
 /// 构建 Review Agent - 代码审查、SOP 合规检查
@@ -121,21 +126,7 @@ pub fn build_review_agent(
     sop: Option<&Sop>,
     skills: &[&Skill],
 ) -> Result<adk_rust::agent::LlmAgent> {
-    let base_instruction = match role {
-        Some(r) => build_role_instruction(r, sop),
-        None => DEFAULT_REVIEW_INSTRUCTION.to_string(),
-    };
-    let instruction = inject_skills(&base_instruction, skills);
-    let role_filtered = filter_tools_by_role(tools, role);
-    let filtered_tools = filter_tools_by_skills(role_filtered, skills);
-
-    let builder = LlmAgentBuilder::new("review_agent")
-        .instruction(instruction)
-        .model(model);
-    let builder = filtered_tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    builder.build().map_err(|e| {
-        crate::error::DevnpcError::Config(format!("Review Agent 构建失败: {e}"))
-    })
+    build_agent_impl("review_agent", DEFAULT_REVIEW_INSTRUCTION, tools, model, role, sop, skills)
 }
 
 /// 构建 PM Agent - 需求分解、任务拆分、优先级定义
@@ -150,21 +141,7 @@ pub fn build_pm_agent(
     sop: Option<&Sop>,
     skills: &[&Skill],
 ) -> Result<adk_rust::agent::LlmAgent> {
-    let base_instruction = match role {
-        Some(r) => build_role_instruction(r, sop),
-        None => DEFAULT_PM_INSTRUCTION.to_string(),
-    };
-    let instruction = inject_skills(&base_instruction, skills);
-    let role_filtered = filter_tools_by_role(tools, role);
-    let filtered_tools = filter_tools_by_skills(role_filtered, skills);
-
-    let builder = LlmAgentBuilder::new("pm_agent")
-        .instruction(instruction)
-        .model(model);
-    let builder = filtered_tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    builder.build().map_err(|e| {
-        crate::error::DevnpcError::Config(format!("PM Agent 构建失败: {e}"))
-    })
+    build_agent_impl("pm_agent", DEFAULT_PM_INSTRUCTION, tools, model, role, sop, skills)
 }
 
 #[cfg(test)]

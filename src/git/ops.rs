@@ -1,10 +1,16 @@
 //! Git 命令封装
 //!
-//! 通过 std::process::Command 调用系统 git,避免 libgit2 C 依赖。
-//! 同步执行: CI 单任务环境,git 命令通常较快;clone/push 较慢但可接受。
+//! - 异步方法 (clone/checkout/commit/push/merge/recent_commits) 使用 `tokio::process::Command`,
+//!   避免阻塞 tokio worker 线程。
+//! - 同步方法 (ls_tree_head/ls_tree_subdir) 使用 `std::process::Command`,
+//!   仅供 `build_repo_tree` 在 `spawn_blocking` 上下文中调用。
+//!
+//! 失败时保留 stderr,便于排查"命令不存在/权限拒绝/路径不存在"等场景。
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Command as StdCommand;
+
+use tokio::process::Command;
 
 use crate::error::{DevnpcError, Result};
 
@@ -22,22 +28,57 @@ impl GitOps {
         }
     }
 
-    /// 执行 git 命令,返回 stdout (trim 后)。
-    /// 非 0 退出码返回 GitCommand 错误。
-    fn run_git_cmd(&self, args: &[String]) -> Result<String> {
+    /// 异步执行 git 命令,返回 stdout (trim 后)。
+    /// 非 0 退出码返回 GitCommand 错误 (携带 stderr)。
+    async fn run_git_cmd(&self, args: &[String]) -> Result<String> {
+        let cmd_str = format!("git {}", args.join(" "));
         let output = Command::new("git")
             .args(args)
             .current_dir(&self.workspace)
             .output()
-            .map_err(|_e| DevnpcError::GitCommand {
-                cmd: format!("git {}", args.join(" ")),
+            .await
+            .map_err(|e| DevnpcError::GitCommand {
+                cmd: cmd_str.clone(),
                 code: -1,
+                stderr: e.to_string(),
             })?;
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string();
             return Err(DevnpcError::GitCommand {
-                cmd: format!("git {}", args.join(" ")),
+                cmd: cmd_str,
                 code,
+                stderr,
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(stdout)
+    }
+
+    /// 同步执行 git 命令 (仅供 spawn_blocking 上下文使用)。
+    /// 非 0 退出码返回 GitCommand 错误 (携带 stderr)。
+    fn run_git_cmd_sync(&self, args: &[String]) -> Result<String> {
+        let cmd_str = format!("git {}", args.join(" "));
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(&self.workspace)
+            .output()
+            .map_err(|e| DevnpcError::GitCommand {
+                cmd: cmd_str.clone(),
+                code: -1,
+                stderr: e.to_string(),
+            })?;
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string();
+            return Err(DevnpcError::GitCommand {
+                cmd: cmd_str,
+                code,
+                stderr,
             });
         }
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -55,19 +96,26 @@ impl GitOps {
             url.into(),
             self.workspace.to_string_lossy().into(),
         ];
+        let cmd_str = format!("git {}", args.join(" "));
         // clone 不在 workspace 内执行 (workspace 可能尚未存在)
         let output = Command::new("git")
             .args(&args)
             .output()
-            .map_err(|_e| DevnpcError::GitCommand {
-                cmd: format!("git {}", args.join(" ")),
+            .await
+            .map_err(|e| DevnpcError::GitCommand {
+                cmd: cmd_str.clone(),
                 code: -1,
+                stderr: e.to_string(),
             })?;
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string();
             return Err(DevnpcError::GitCommand {
-                cmd: format!("git {}", args.join(" ")),
+                cmd: cmd_str,
                 code,
+                stderr,
             });
         }
         Ok(())
@@ -76,13 +124,15 @@ impl GitOps {
     /// 创建并切换分支
     pub async fn checkout_branch(&self, branch: &str) -> Result<()> {
         self.run_git_cmd(&["checkout".into(), "-b".into(), branch.into()])
+            .await
             .map(|_| ())
     }
 
     /// 提交所有变更 (git add -A + git commit)
     pub async fn commit(&self, message: &str) -> Result<()> {
-        self.run_git_cmd(&["add".into(), "-A".into()])?;
+        self.run_git_cmd(&["add".into(), "-A".into()]).await?;
         self.run_git_cmd(&["commit".into(), "-m".into(), message.into()])
+            .await
             .map(|_| ())
     }
 
@@ -94,32 +144,39 @@ impl GitOps {
             "origin".into(),
             branch.into(),
         ])
+        .await
         .map(|_| ())
     }
 
     /// 合并指定分支到当前分支
     pub async fn merge_branch(&self, branch: &str) -> Result<()> {
         self.run_git_cmd(&["merge".into(), branch.into()])
+            .await
             .map(|_| ())
     }
 
     /// 获取最近 N 条提交 (git log --oneline -N)
     pub async fn recent_commits(&self, count: usize) -> Result<Vec<String>> {
         let n = format!("-{count}");
-        let out = self.run_git_cmd(&["log".into(), "--oneline".into(), n])?;
+        let out = self
+            .run_git_cmd(&["log".into(), "--oneline".into(), n])
+            .await?;
         Ok(out.lines().map(|s| s.to_string()).collect())
     }
 
     /// ls-tree HEAD (顶层,非递归),返回原始 stdout 供 repo_index 解析
+    ///
+    /// 同步接口:此方法仅供 `build_repo_tree` 在 `spawn_blocking` 上下文中调用,
+    /// 避免 async fn 在 spawn_blocking 中嵌套 runtime。
     pub fn ls_tree_head(&self) -> Result<String> {
-        self.run_git_cmd(&["ls-tree".into(), "HEAD".into()])
+        self.run_git_cmd_sync(&["ls-tree".into(), "HEAD".into()])
     }
 
     /// ls-tree HEAD <path>/ (指定子目录,非递归,展开目录内容)
     /// 尾斜杠确保展开目录内容而非返回目录本身;path 相对仓库根
     pub fn ls_tree_subdir(&self, subdir: &str) -> Result<String> {
         let path_arg = format!("{subdir}/");
-        self.run_git_cmd(&["ls-tree".into(), "HEAD".into(), path_arg])
+        self.run_git_cmd_sync(&["ls-tree".into(), "HEAD".into(), path_arg])
     }
 }
 
@@ -127,12 +184,15 @@ impl GitOps {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
-    #[test]
-    fn run_git_cmd_returns_git_command_error_on_non_zero_exit() {
+    #[tokio::test]
+    async fn run_git_cmd_returns_git_command_error_on_non_zero_exit() {
         let ops = GitOps::new(".");
-        let result = ops.run_git_cmd(&["nonexistent-subcommand".to_string()]);
+        let result = ops
+            .run_git_cmd(&["nonexistent-subcommand".to_string()])
+            .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, crate::error::DevnpcError::GitCommand { .. }));
@@ -146,18 +206,18 @@ mod tests {
         fs::create_dir_all(&repo_path).unwrap();
 
         // git init
-        Command::new("git")
+        StdCommand::new("git")
             .args(["init"])
             .current_dir(&repo_path)
             .output()
             .unwrap();
         // 配置 user (CI 环境可能无全局配置)
-        Command::new("git")
+        StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&repo_path)
             .output()
             .unwrap();
-        Command::new("git")
+        StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(&repo_path)
             .output()
@@ -170,12 +230,12 @@ mod tests {
         fs::write(repo_path.join("src/main.rs"), "fn main() {}\n").unwrap();
 
         // git add + commit
-        Command::new("git")
+        StdCommand::new("git")
             .args(["add", "-A"])
             .current_dir(&repo_path)
             .output()
             .unwrap();
-        Command::new("git")
+        StdCommand::new("git")
             .args(["commit", "-m", "initial commit"])
             .current_dir(&repo_path)
             .output()
@@ -193,8 +253,8 @@ mod tests {
         assert!(commits[0].contains("initial commit"));
     }
 
-    #[tokio::test]
-    async fn ls_tree_head_returns_top_level_entries() {
+    #[test]
+    fn ls_tree_head_returns_top_level_entries() {
         let (_dir, ops) = setup_temp_repo();
         let tree = ops.ls_tree_head().unwrap();
         // 顶层应包含 README.md, Cargo.toml, src
@@ -210,6 +270,7 @@ mod tests {
         // 验证当前分支
         let branch = ops
             .run_git_cmd(&["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()])
+            .await
             .unwrap();
         assert_eq!(branch, "npc/test-branch");
     }

@@ -76,10 +76,10 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 |------|------|
 | **AI 自动编码** | 理解项目上下文,自动修改代码、修复 bug、实现功能 |
 | **CI 闭环** | 自动创建 Draft MR → 轮询 Pipeline → 失败时解析日志 → 修复重试 |
-| **多触发方式** | MR/Issue 评论 `@devnpc` 触发,或命令行手动触发 |
+| **多触发方式** | MR/Issue 评论 `@devnpc` 触发,Webhook 实时触发,或命令行手动触发 |
 | **多模型路由** | 支持 DeepSeek/OpenAI/Anthropic/Gemini,简单/复杂任务可用不同模型 |
 | **NPC 配置系统** | Role(身份) + SOP(流程) + Skill(领域知识) + Team(协作),YAML 声明式配置 |
-| **9 种语言支持** | Rust、Java、Python、JavaScript、TypeScript、Tsx、Go、C、C++ 的 AST 级代码感知 |
+| **13 种语言支持** | Rust、Java、Python、JavaScript、TypeScript、Tsx、Go、C、C++、Ruby、PHP、Swift、Kotlin 的 AST 级代码感知 |
 
 ### 工具列表
 
@@ -387,6 +387,33 @@ devnpc 自动检测 `CI_MERGE_REQUEST_IID` 环境变量,解析最新评论中的
 ```bash
 devnpc run --task "添加用户登录接口的单元测试"
 ```
+
+#### 方式 D: Webhook 实时触发 (服务器部署)
+
+启动 webhook 服务器常驻进程,GitLab webhook 事件实时触发任务 (替代轮询模式):
+
+```bash
+# 启动 webhook 服务器 (默认 0.0.0.0:8080)
+devnpc serve
+
+# 自定义端口和地址
+devnpc serve --port 9090 --host 127.0.0.1
+```
+
+GitLab 项目 Settings → Webhooks 中配置:
+- URL: `http://your-server:8080/webhook`
+- Secret token: 与 `DEVNPC_WEBHOOK_SECRET` 环境变量一致
+- Trigger: `Note events` (评论事件)
+
+环境变量:
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `DEVNPC_WEBHOOK_ENABLED` | `false` | 启用 webhook |
+| `DEVNPC_WEBHOOK_HOST` | `0.0.0.0` | 监听地址 |
+| `DEVNPC_WEBHOOK_PORT` | `8080` | 监听端口 |
+| `DEVNPC_WEBHOOK_SECRET` | (空) | X-Gitlab-Token 校验密钥 |
+| `DEVNPC_WEBHOOK_PATH` | `/webhook` | webhook 路径 |
 
 ### 5. 执行流程
 

@@ -179,6 +179,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     /// npc-config 角色与 SOP 配置
     pub npc_config: NpcConfigSection,
+    /// Webhook 服务器配置 (trigger/webhook.rs)
+    pub webhook: WebhookConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -303,6 +305,24 @@ impl Default for NpcConfigSection {
             base_dir: "npc-config".to_string(),
         }
     }
+}
+
+/// Webhook 服务器配置
+///
+/// 用于接收 GitLab webhook 事件 (Note/MergeRequest/Issue),自动触发任务执行。
+/// 替代 `@devnpc` 评论轮询模式,减少触发延迟。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WebhookConfig {
+    /// 是否启用 webhook 服务器 (默认 false,仅在 `serve` 子命令时启动)
+    pub enabled: bool,
+    /// 监听地址 (默认 "0.0.0.0")
+    pub host: String,
+    /// 监听端口 (默认 8080)
+    pub port: u16,
+    /// GitLab webhook secret (用于校验 X-Gitlab-Token header,空则不校验)
+    pub secret: String,
+    /// webhook 路径 (默认 "/webhook")
+    pub path: String,
 }
 
 impl Config {

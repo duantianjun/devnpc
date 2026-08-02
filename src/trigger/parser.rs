@@ -33,8 +33,13 @@ pub enum TaskKind {
 
 /// 从评论中查找 @devnpc 提及并解析任务
 pub fn parse_mention(body: &str) -> Option<TaskSpec> {
+    use std::sync::OnceLock;
+    static MENTION_RE: OnceLock<Regex> = OnceLock::new();
+    static ISSUE_RE: OnceLock<Regex> = OnceLock::new();
     // 查找 @devnpc 提及
-    let re = Regex::new(r"@devnpc\s*(.*)").ok()?;
+    let re = MENTION_RE.get_or_init(|| {
+        Regex::new(r"@devnpc\s*(.*)").expect("静态 Regex 编译失败 (MENTION_RE)")
+    });
     let caps = re.captures(body)?;
     let text = caps.get(1)?.as_str().trim();
     if text.is_empty() {
@@ -44,9 +49,11 @@ pub fn parse_mention(body: &str) -> Option<TaskSpec> {
     let kind = classify_task(text);
 
     // 检测目标 Issue (#42) 引用
-    let target_issue = Regex::new(r"#(\d+)")
-        .ok()
-        .and_then(|re| re.captures(text))
+    let issue_re = ISSUE_RE.get_or_init(|| {
+        Regex::new(r"#(\d+)").expect("静态 Regex 编译失败 (ISSUE_RE)")
+    });
+    let target_issue = issue_re
+        .captures(text)
         .and_then(|c| c[1].parse().ok());
 
     Some(TaskSpec {

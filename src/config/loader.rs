@@ -219,6 +219,17 @@ fn load_internal(
                 .unwrap_or(true),
             base_dir: env::get_or_default("DEVNPC_NPC_CONFIG_DIR", "npc-config"),
         },
+        webhook: crate::config::WebhookConfig {
+            enabled: env::get_optional("DEVNPC_WEBHOOK_ENABLED")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            host: env::get_or_default("DEVNPC_WEBHOOK_HOST", "0.0.0.0"),
+            port: env::get_optional("DEVNPC_WEBHOOK_PORT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8080),
+            secret: env::get_or_default("DEVNPC_WEBHOOK_SECRET", ""),
+            path: env::get_or_default("DEVNPC_WEBHOOK_PATH", "/webhook"),
+        },
     })
 }
 

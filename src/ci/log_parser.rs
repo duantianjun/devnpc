@@ -99,25 +99,42 @@ fn extract_context(log: &str, center: usize) -> Vec<String> {
 
 /// 从 "--> src/file.rs:45:13" 行提取文件与行号
 fn extract_file_line_from_arrow(line: &str) -> (Option<String>, Option<u32>) {
-    let file = regex::Regex::new(r"-->\s*([^\s:]+\.rs)")
-        .ok()
-        .and_then(|re| re.captures(line))
-        .map(|c| c[1].to_string());
-    let line_num = regex::Regex::new(r":(\d+):\d+")
-        .ok()
-        .and_then(|re| re.captures(line))
+    use std::sync::OnceLock;
+    static FILE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static LINE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let file_re = FILE_RE.get_or_init(|| {
+        // 扩展支持多语言: .rs/.java/.py/.go/.js/.ts/.c/.cpp 等
+        regex::Regex::new(r"-->\s*([^\s:]+\.(?:rs|java|py|go|js|ts|c|cpp|cc|h|hpp))")
+            .expect("静态 Regex 编译失败 (FILE_RE)")
+    });
+    let line_re = LINE_RE.get_or_init(|| {
+        regex::Regex::new(r":(\d+):\d+").expect("静态 Regex 编译失败 (LINE_RE)")
+    });
+    let file = file_re.captures(line).map(|c| c[1].to_string());
+    let line_num = line_re
+        .captures(line)
         .and_then(|c| c[1].parse().ok());
     (file, line_num)
 }
 
 fn extract_file_from_panic(line: &str) -> Option<String> {
-    let re = regex::Regex::new(r"'[^']*',\s*([^:]+\.rs)").ok()?;
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"'[^']*',\s*([^:]+\.(?:rs|java|py|go|js|ts|c|cpp|cc|h|hpp))")
+            .expect("静态 Regex 编译失败 (PANIC_FILE_RE)")
+    });
     re.captures(line).map(|c| c[1].to_string())
 }
 
 fn extract_line_from_panic(line: &str) -> Option<u32> {
-    regex::Regex::new(r"\.rs:(\d+)").ok()?
-        .captures(line)
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"\.(?:rs|java|py|go|js|ts|c|cpp|cc|h|hpp):(\d+)")
+            .expect("静态 Regex 编译失败 (PANIC_LINE_RE)")
+    });
+    re.captures(line)
         .and_then(|c| c[1].parse().ok())
 }
 

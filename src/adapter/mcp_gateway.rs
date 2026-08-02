@@ -133,46 +133,75 @@ impl McpGateway {
     /// 连接所有已注册的 MCP 服务器，收集工具集
     ///
     /// 连接成功后，工具集可通过 `take_toolsets()` 获取并添加到 Agent。
+    ///
+    /// 实现策略:
+    /// 1. 在读锁下克隆所有服务器描述 (短临界区)
+    /// 2. 释放锁后并行连接所有服务器 (网络 IO 不持锁)
+    /// 3. 短写锁一次性 extend 工具集
     pub async fn connect_all(&self) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
         }
 
-        let servers = self.servers.read().await;
-        let mut toolsets = self.toolsets.write().await;
+        // 1. 短读锁:克隆服务器描述快照
+        let servers: Vec<(String, McpServerDesc)> = {
+            let servers = self.servers.read().await;
+            servers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
 
-        for (name, desc) in servers.iter() {
-            match desc.transport.as_str() {
-                "stdio" => {
-                    if let Some(cmd) = &desc.command {
-                        match Self::connect_stdio(name, cmd, &desc.args).await {
-                            Ok(toolset) => {
-                                tracing::info!(server = %name, "MCP (stdio) 服务器连接成功");
-                                toolsets.push(toolset);
+        // 2. 并行连接 (不持锁)
+        let mut tasks = Vec::with_capacity(servers.len());
+        for (name, desc) in servers {
+            tasks.push(async move {
+                match desc.transport.as_str() {
+                    "stdio" => {
+                        if let Some(cmd) = &desc.command {
+                            match Self::connect_stdio(&name, cmd, &desc.args).await {
+                                Ok(toolset) => Some(toolset),
+                                Err(e) => {
+                                    tracing::warn!(server = %name, error = %e, "MCP (stdio) 服务器连接失败");
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(server = %name, error = %e, "MCP (stdio) 服务器连接失败");
-                            }
+                        } else {
+                            tracing::warn!(server = %name, "stdio 服务器缺少 command 字段");
+                            None
                         }
                     }
-                }
-                "http" => {
-                    if let Some(url) = &desc.url {
-                        match Self::connect_http(name, url, &desc.auth, desc.timeout_secs).await {
-                            Ok(toolset) => {
-                                tracing::info!(server = %name, url = %url, "MCP (http) 服务器连接成功");
-                                toolsets.push(toolset);
+                    "http" => {
+                        if let Some(url) = &desc.url {
+                            match Self::connect_http(&name, url, &desc.auth, desc.timeout_secs).await {
+                                Ok(toolset) => {
+                                    tracing::info!(server = %name, url = %url, "MCP (http) 服务器连接成功");
+                                    Some(toolset)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(server = %name, url = %url, error = %e, "MCP (http) 服务器连接失败");
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(server = %name, url = %url, error = %e, "MCP (http) 服务器连接失败");
-                            }
+                        } else {
+                            tracing::warn!(server = %name, "http 服务器缺少 url 字段");
+                            None
                         }
                     }
+                    other => {
+                        tracing::warn!(transport = other, "不支持的 MCP 传输方式");
+                        None
+                    }
                 }
-                _ => {
-                    tracing::warn!(transport = %desc.transport, "不支持的 MCP 传输方式");
-                }
-            }
+            });
+        }
+        let results = futures::future::join_all(tasks).await;
+
+        // 3. 短写锁:一次性 extend
+        let connected: Vec<_> = results.into_iter().flatten().collect();
+        if !connected.is_empty() {
+            let mut toolsets = self.toolsets.write().await;
+            toolsets.extend(connected);
         }
 
         Ok(())
@@ -256,31 +285,38 @@ impl McpGateway {
     /// 扫描 `mcp_servers_dir` 下的所有 `.yml` 文件,解析为 `McpServerDesc` 并注册。
     /// YAML 格式见 `npc-config/mcp-servers/codemap.yml`。
     /// 支持环境变量展开: `${ENV_VAR}` 会被替换为对应的环境变量值。
+    ///
+    /// 使用 `tokio::fs` 异步读取,避免阻塞 tokio worker 线程。
     pub async fn load_from_yaml(&self, mcp_servers_dir: &std::path::Path) -> Result<usize> {
         if !self.config.enabled {
             return Ok(0);
         }
 
+        // 用 tokio::fs 异步读取目录是否存在
         if !mcp_servers_dir.exists() {
             tracing::debug!(dir = %mcp_servers_dir.display(), "MCP 服务器配置目录不存在,跳过加载");
             return Ok(0);
         }
 
         let mut count = 0;
-        let entries = std::fs::read_dir(mcp_servers_dir).map_err(|e| {
+        let mut entries = tokio::fs::read_dir(mcp_servers_dir).await.map_err(|e| {
             crate::error::DevnpcError::Config(format!(
                 "读取 MCP 配置目录失败 ({}): {e}",
                 mcp_servers_dir.display()
             ))
         })?;
 
-        for entry in entries.flatten() {
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            crate::error::DevnpcError::Config(format!(
+                "遍历 MCP 配置目录失败: {e}"
+            ))
+        })? {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("yml") {
                 continue;
             }
 
-            let content = match std::fs::read_to_string(&path) {
+            let content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(file = %path.display(), error = %e, "读取 MCP 配置文件失败,跳过");

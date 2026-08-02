@@ -31,7 +31,7 @@ pub fn filter_failed(pipelines: &[Pipeline], count: usize) -> Vec<Pipeline> {
 
 /// 拉取 pipeline 下所有 job 的日志
 ///
-/// 顺序: 先取 job 列表,再对每个 job 取日志。
+/// 顺序: 先取 job 列表,再并行对每个 job 取日志。
 /// 单个 job 日志获取失败时,日志字段记录错误占位,不中断整体流程。
 pub async fn fetch_job_logs(
     gitlab: &dyn GitlabApi,
@@ -39,14 +39,19 @@ pub async fn fetch_job_logs(
     pipeline_id: u64,
 ) -> Result<Vec<JobLog>> {
     let jobs = gitlab.get_pipeline_jobs(project_id, pipeline_id).await?;
-    let mut result = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        let log = match gitlab.get_job_log(project_id, job.id).await {
-            Ok(l) => l,
-            Err(e) => format!("[无法获取 job #{} 日志: {}]", job.id, e),
-        };
-        result.push(JobLog { job, log });
-    }
+
+    // 并行拉取所有 job 日志 (gitlab trait 对象是 Send + Sync,可安全共享引用)
+    let tasks: Vec<_> = jobs
+        .into_iter()
+        .map(|job| async move {
+            let log = match gitlab.get_job_log(project_id, job.id).await {
+                Ok(l) => l,
+                Err(e) => format!("[无法获取 job #{} 日志: {}]", job.id, e),
+            };
+            JobLog { job, log }
+        })
+        .collect();
+    let result = futures::future::join_all(tasks).await;
     Ok(result)
 }
 

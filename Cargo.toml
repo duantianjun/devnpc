@@ -44,6 +44,10 @@ adk-rust = { version = "1", features = [
 # HTTP / GitLab API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
+# Webhook 服务器 (axum 与 tokio 生态兼容)
+axum = "0.7"
+tower = "0.5"
+
 # 代码感知工具 (AFT)
 tree-sitter = "0.26"
 tree-sitter-rust = "0.23"
@@ -54,6 +58,11 @@ tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
+# 新增语言 (Ruby/PHP/Swift/Kotlin)
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.24"
+tree-sitter-swift = "0.7"
+tree-sitter-kotlin-sg = "0.4"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,35 @@
+# 构建产物
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 文档 (无需打包进镜像)
+docs/
+*.md
+!README.md
+
+# 测试 / 临时文件
+.codemap/
+.devnpc-memory.db*
+.env
+.env.local
+
+# CI 示例
+.gitlab-ci.yml.example
+
+# Docker 自身
+Dockerfile
+.dockerignore
+
+# 计划 / Spec 文档
+docs/
+
+# Cargo lock 在二进制项目中需要,保留
+# Cargo.lock

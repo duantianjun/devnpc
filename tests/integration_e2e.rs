@@ -443,10 +443,17 @@ async fn test_report_data_construction_from_ci_outcome() {
         mr_iid: 42,
         stage: "test".into(),
     };
+    let error = CiOutcome::Error {
+        mr_iid: 0,
+        reason: "创建 MR 失败".into(),
+    };
 
     assert!(matches!(passed, CiOutcome::Passed { .. }));
     assert!(matches!(failed, CiOutcome::Failed { .. }));
     assert!(matches!(timeout, CiOutcome::Timeout { .. }));
+    assert!(matches!(error, CiOutcome::Error { .. }));
+    // 关键: Error 不应被误判为 Passed
+    assert!(!matches!(error, CiOutcome::Passed { .. }));
 }
 
 #[tokio::test]

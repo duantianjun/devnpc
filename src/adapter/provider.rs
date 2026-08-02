@@ -182,6 +182,7 @@ mod tests {
             mcp: McpConfig::default(),
             memory: MemoryConfig::default(),
             npc_config: crate::config::NpcConfigSection::default(),
+            webhook: crate::config::WebhookConfig::default(),
         }
     }
 
