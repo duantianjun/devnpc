@@ -18,10 +18,12 @@ use crate::adapter::file_io::FileIo;
 /// 创建所有业务工具的 FunctionTool 包装
 ///
 /// `gitlab` 和 `project_id` 为可选,仅在需要 create_mr_note 工具时传入。
+/// `mcp_tools` 为可选,来自 MCP Gateway 收集的远程工具。
 pub fn create_all_tools(
     config: &Config,
     gitlab: Option<Arc<dyn GitlabApi>>,
     project_id: Option<u64>,
+    mcp_tools: Vec<Arc<dyn Tool>>,
 ) -> Vec<Arc<dyn Tool>> {
     let workspace = std::env::current_dir().expect("获取工作目录失败");
     let file_io = FileIo::new(&workspace);
@@ -49,6 +51,9 @@ pub fn create_all_tools(
     if let (Some(gitlab), Some(pid)) = (gitlab, project_id) {
         tools.push(Arc::new(create_mr_note_tool(gitlab, pid)));
     }
+
+    // 合并 MCP 工具
+    tools.extend(mcp_tools);
 
     tools
 }

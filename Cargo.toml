@@ -69,6 +69,12 @@ regex = "1"
 dotenvy = "0.15"
 async-trait = "0.1"     # TODO: 阶段 C 移除,由 adk-rust 提供
 
+# 长期记忆存储
+rusqlite = "0.32"
+
+# MCP 协议 (通过 adk-rust 的 mcp feature 使用)
+rmcp = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.13"

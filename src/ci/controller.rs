@@ -328,6 +328,24 @@ impl CiController {
             }
         })?;
 
+        // 评论修复完成通知
+        if let Err(e) = self
+            .gitlab
+            .create_mr_note(
+                self.project_id,
+                mr_iid,
+                &format!(
+                    "✅ CI 修复尝试 #{}/{} 完成，已推送至 {}，正在等待新 pipeline...",
+                    attempt + 1,
+                    self.config.max_retries,
+                    branch,
+                ),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "创建修复完成评论失败");
+        }
+
         tracing::info!(branch, "修复已推送");
         Ok(branch.to_string())
     }

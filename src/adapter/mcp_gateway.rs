@@ -1,12 +1,15 @@
 //! MCP Gateway: 管理 MCP 客户端连接
 //!
 //! 利用 adk-rust 的 mcp feature，建立统一的 MCP 协议入口。
-//! 支持 stdio 和 streamable HTTP 两种传输方式。
+//! 支持 stdio 传输方式，通过 rmcp 和 adk-rust 的 McpToolset 连接 MCP 服务器。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use adk_rust::Tool;
+use adk_rust::tool::McpToolset;
+use adk_rust::Toolset;
+use rmcp::{ServiceExt, transport::TokioChildProcess};
+use tokio::process::Command;
 use tokio::sync::RwLock;
 
 use crate::config::McpConfig;
@@ -27,6 +30,8 @@ pub struct McpServerDesc {
 pub struct McpGateway {
     config: McpConfig,
     servers: Arc<RwLock<HashMap<String, McpServerDesc>>>,
+    /// 已连接的 McpToolset 工具集
+    toolsets: Arc<RwLock<Vec<Arc<dyn Toolset>>>>,
 }
 
 impl McpGateway {
@@ -34,6 +39,7 @@ impl McpGateway {
         Self {
             config,
             servers: Arc::new(RwLock::new(HashMap::new())),
+            toolsets: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -43,32 +49,35 @@ impl McpGateway {
         servers.insert(desc.name.clone(), desc);
     }
 
-    /// 收集所有 MCP 工具 (通过 adk-rust 的 MCP 客户端连接)
+    /// 连接所有已注册的 MCP 服务器，收集工具集
     ///
-    /// 注意: adk-rust 的 MCP 客户端需要根据实际 API 调整。
-    /// 当前返回空列表，后续根据 adk-rust mcp feature 实现具体连接。
-    pub async fn collect_mcp_tools(&self) -> Result<Vec<Arc<dyn Tool>>> {
+    /// 连接成功后，工具集可通过 `take_toolsets()` 获取并添加到 Agent。
+    pub async fn connect_all(&self) -> Result<()> {
         if !self.config.enabled {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         let servers = self.servers.read().await;
-        let tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut toolsets = self.toolsets.write().await;
 
-        for (_name, desc) in servers.iter() {
+        for (name, desc) in servers.iter() {
             match desc.transport.as_str() {
                 "stdio" => {
                     if let Some(cmd) = &desc.command {
-                        tracing::info!(server = %desc.name, cmd = %cmd, "注册 stdio MCP 服务器");
-                        // TODO: 根据 adk-rust MCP API 实现 StdioMcpClient 连接
-                        let _ = cmd;
+                        match Self::connect_stdio(name, cmd, &desc.args).await {
+                            Ok(toolset) => {
+                                tracing::info!(server = %name, "MCP 服务器连接成功");
+                                toolsets.push(toolset as Arc<dyn Toolset>);
+                            }
+                            Err(e) => {
+                                tracing::warn!(server = %name, error = %e, "MCP 服务器连接失败");
+                            }
+                        }
                     }
                 }
                 "http" => {
                     if let Some(url) = &desc.url {
-                        tracing::info!(server = %desc.name, url = %url, "注册 HTTP MCP 服务器");
-                        // TODO: 根据 adk-rust MCP API 实现 HttpMcpClient 连接
-                        let _ = url;
+                        tracing::warn!(server = %name, url = %url, "HTTP MCP 传输暂未实现");
                     }
                 }
                 _ => {
@@ -77,7 +86,30 @@ impl McpGateway {
             }
         }
 
-        Ok(tools)
+        Ok(())
+    }
+
+    /// 通过 stdio 连接 MCP 服务器，返回 McpToolset
+    async fn connect_stdio(name: &str, cmd: &str, args: &[String]) -> Result<Arc<McpToolset>> {
+        let mut command = Command::new(cmd);
+        command.args(args);
+
+        let transport = TokioChildProcess::new(command).map_err(|e| {
+            crate::error::DevnpcError::Config(format!("MCP 传输创建失败 ({name}): {e}"))
+        })?;
+
+        let client = ().serve(transport).await.map_err(|e| {
+            crate::error::DevnpcError::Config(format!("MCP 客户端连接失败 ({name}): {e}"))
+        })?;
+
+        let toolset = McpToolset::new(client);
+        Ok(Arc::new(toolset))
+    }
+
+    /// 获取已连接的 MCP 工具集
+    pub async fn take_toolsets(&self) -> Vec<Arc<dyn Toolset>> {
+        let mut toolsets = self.toolsets.write().await;
+        std::mem::take(&mut *toolsets)
     }
 
     /// 启动 codemap 子进程 (stdio 模式)

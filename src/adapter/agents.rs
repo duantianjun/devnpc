@@ -26,9 +26,9 @@ pub fn build_code_agent(
         .model(model);
     // 逐个添加工具
     let builder = tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    Ok(builder.build().map_err(|e| {
+    builder.build().map_err(|e| {
         crate::error::DevnpcError::Config(format!("Code Agent 构建失败: {e}"))
-    })?)
+    })
 }
 
 /// 构建 Fix Agent - CI 日志分析、根因定位、修复代码
@@ -48,9 +48,9 @@ pub fn build_fix_agent(
         )
         .model(model);
     let builder = tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    Ok(builder.build().map_err(|e| {
+    builder.build().map_err(|e| {
         crate::error::DevnpcError::Config(format!("Fix Agent 构建失败: {e}"))
-    })?)
+    })
 }
 
 /// 构建 Review Agent - 代码审查、SOP 合规检查
@@ -69,7 +69,7 @@ pub fn build_review_agent(
         )
         .model(model);
     let builder = tools.into_iter().fold(builder, |b, tool| b.tool(tool));
-    Ok(builder.build().map_err(|e| {
+    builder.build().map_err(|e| {
         crate::error::DevnpcError::Config(format!("Review Agent 构建失败: {e}"))
-    })?)
+    })
 }

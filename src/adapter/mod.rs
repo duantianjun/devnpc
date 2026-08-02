@@ -12,6 +12,7 @@ pub mod callbacks;
 pub mod context;
 pub mod file_io;
 pub mod mcp_gateway;
+pub mod memory;
 pub mod orchestrator;
 pub mod provider;
 pub mod tools;

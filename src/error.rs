@@ -53,6 +53,9 @@ pub enum DevnpcError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error("SQLite 错误: {0}")]
+    Sqlite(String),
 }
 
 pub type Result<T> = std::result::Result<T, DevnpcError>;
