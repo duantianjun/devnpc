@@ -357,12 +357,21 @@ let evaluator = Evaluator::new()
 **新增的依赖**:
 ```toml
 adk-rust = { version = "1", features = [
-    "deepseek", "openai", "anthropic", "gemini",  # 模型提供商
-    "agent", "runner", "session", "tool",          # 核心框架
-    "mcp", "graph", "rag", "guardrail",           # 功能模块
-    "memory", "code-exec", "eval"                 # 功能模块
+    "minimal",                    # 核心: agents, models, gemini, runner, sessions
+    "openai", "anthropic", "deepseek",  # 其他模型提供商
+    "tools",                      # FunctionTool 系统
+    "graph",                      # 工作流编排 (SequentialAgent/ParallelAgent)
+    "mcp",                        # MCP 协议对接
+    "guardrail",                  # 安全护栏
+    "memory",                     # 框架级会话记忆
+    "rag",                        # 检索增强生成
+    "code",                       # 代码执行沙箱
+    "eval",                       # Agent 评估
 ] }
 ```
+
+注: `minimal` feature 已包含 `agents`、`models`、`gemini`、`runner`、`sessions`。
+`code` feature 对应 `adk-code` crate (代码执行)。`tools` feature 对应 `adk-tool` crate (FunctionTool + MCP)。
 
 ### 4.2 Rust 版本升级
 

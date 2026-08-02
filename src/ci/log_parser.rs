@@ -42,8 +42,7 @@ pub fn parse_log_with_config(job_name: &str, log: &str, config: &LogParserConfig
 
     for (i, line) in log.lines().enumerate() {
         // 编译错误: error[E0277]: ...
-        if let Some(msg) = line.strip_prefix("error[") {
-            if let Some(end) = msg.find("]:") {
+        if let Some(msg) = line.strip_prefix("error[") && let Some(end) = msg.find("]:") {
                 let error_message = msg[end + 2..].trim().to_string();
                 let context = extract_context(log, i);
                 // Rust 编译错误的文件/行号在下一行: --> src/file.rs:45:13
@@ -59,7 +58,6 @@ pub fn parse_log_with_config(job_name: &str, log: &str, config: &LogParserConfig
                     context_lines: context,
                 });
             }
-        }
 
         // 测试失败: panicked at '...', src/file.rs:42:13
         if line.contains("panicked at") {

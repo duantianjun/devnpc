@@ -2,13 +2,15 @@
 //!
 //! 并行获取仓库结构、Issue、PR、CI 历史,聚合为 Context。
 
+use serde::Serialize;
+
 use crate::config::{ContextConfig, ProjectConfig};
 use crate::error::Result;
 use crate::git::ops::GitOps;
 use crate::gitlab_api::{Issue, MergeRequest, Note, Pipeline};
 
 /// 聚合的研发记忆
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Context {
     pub repo_tree: RepoTree,
     pub key_files: Vec<KeyFile>,
@@ -21,33 +23,33 @@ pub struct Context {
 }
 
 /// 仓库目录树 (精简)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RepoTree {
     pub entries: Vec<TreeEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TreeEntry {
     pub path: String,
     pub kind: TreeKind,
     pub size: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TreeKind {
     File,
     Dir,
 }
 
 /// 关键文件摘要
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct KeyFile {
     pub path: String,
     pub summary: String,
 }
 
 /// CI 失败记录
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CiFailure {
     pub pipeline_id: u64,
     pub job_name: String,
@@ -55,7 +57,7 @@ pub struct CiFailure {
     pub root_cause: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FailureType {
     Compile,
     Test,

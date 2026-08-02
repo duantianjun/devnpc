@@ -1,13 +1,52 @@
-//! 轨迹采集器 (P4 完整实现)
+//! 轨迹采集器
 //!
-//! 从 Agent Trajectory 提取事件,聚合为报告数据。
+//! 从执行轨迹提取事件,聚合为报告数据。
 
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
-use crate::agent::loop_::{Trajectory, TrajectoryEvent};
 use crate::ci::controller::CiOutcome;
+
+// ============================================================
+// 本地轨迹类型 (替代旧的 agent::loop_ 模块)
+// ============================================================
+
+/// 轨迹事件
+#[derive(Debug, Clone)]
+pub enum TrajectoryEvent {
+    /// LLM 调用
+    LlmCall { iteration: usize },
+    /// 工具调用
+    ToolCall { name: String, success: bool },
+    /// SOP 偏离
+    Deviation { step: String, unexpected: Vec<String> },
+}
+
+/// 轨迹 (本地定义)
+#[derive(Debug, Clone, Default)]
+pub struct Trajectory {
+    pub events: Vec<TrajectoryEvent>,
+}
+
+impl Trajectory {
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    /// 记录 LLM 调用
+    pub fn record_llm_call(&mut self, iteration: usize) {
+        self.events.push(TrajectoryEvent::LlmCall { iteration });
+    }
+
+    /// 记录工具调用
+    pub fn record_tool_call(&mut self, name: &str, success: bool) {
+        self.events.push(TrajectoryEvent::ToolCall {
+            name: name.to_string(),
+            success,
+        });
+    }
+}
 
 /// 报告数据 (供 HTML 生成使用)
 #[derive(Debug, Clone)]
@@ -245,7 +284,6 @@ impl Default for TrajectoryCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::loop_::Trajectory;
     use chrono::Utc;
 
     #[test]
