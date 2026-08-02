@@ -38,16 +38,19 @@ pub struct FixExperience {
 pub struct MemoryStore {
     config: MemoryConfig,
     db_path: PathBuf,
+    /// 检索时返回的最大条数 (来自配置,避免硬编码)
+    max_search_results: usize,
     /// 持久的数据库连接，支持 :memory: 模式
     conn: Mutex<Option<Connection>>,
 }
 
 impl MemoryStore {
-    pub fn new(config: MemoryConfig) -> Self {
+    pub fn new(config: MemoryConfig, max_search_results: usize) -> Self {
         let db_path = PathBuf::from(&config.db_path);
         Self {
             config,
             db_path,
+            max_search_results,
             conn: Mutex::new(None),
         }
     }
@@ -217,8 +220,9 @@ impl MemoryStore {
              FROM task_records
              WHERE {}
              ORDER BY created_at DESC
-             LIMIT 10",
-            placeholders.join(" OR ")
+             LIMIT {}",
+            placeholders.join(" OR "),
+            self.max_search_results
         );
 
         let mut stmt = conn
@@ -278,8 +282,9 @@ impl MemoryStore {
              FROM fix_experiences
              WHERE {}
              ORDER BY created_at DESC
-             LIMIT 10",
-            placeholders.join(" OR ")
+             LIMIT {}",
+            placeholders.join(" OR "),
+            self.max_search_results
         );
 
         let mut stmt = conn
@@ -320,7 +325,7 @@ impl MemoryStore {
         }
 
         // 限制返回数量
-        results.truncate(10);
+        results.truncate(self.max_search_results);
         Ok(results)
     }
 }
@@ -333,8 +338,9 @@ mod tests {
         let config = MemoryConfig {
             enabled: true,
             db_path: ":memory:".to_string(),
+            max_search_results: 10,
         };
-        MemoryStore::new(config)
+        MemoryStore::new(config, 10)
     }
 
     #[test]
@@ -406,8 +412,9 @@ mod tests {
         let config = MemoryConfig {
             enabled: false,
             db_path: ":memory:".to_string(),
+            max_search_results: 10,
         };
-        let store = MemoryStore::new(config);
+        let store = MemoryStore::new(config, 10);
         // 不初始化也应该能安全调用
         assert!(store.retrieve_relevant("test").unwrap().is_empty());
         store

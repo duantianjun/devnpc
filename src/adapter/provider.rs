@@ -183,6 +183,9 @@ mod tests {
             memory: MemoryConfig::default(),
             npc_config: crate::config::NpcConfigSection::default(),
             webhook: crate::config::WebhookConfig::default(),
+            cost: crate::config::CostConfig::default(),
+            tools: crate::config::ToolsConfig::default(),
+            trigger: crate::config::TriggerConfig::default(),
         }
     }
 

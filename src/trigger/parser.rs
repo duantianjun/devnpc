@@ -31,15 +31,26 @@ pub enum TaskKind {
     Review,
 }
 
-/// 从评论中查找 @devnpc 提及并解析任务
-pub fn parse_mention(body: &str) -> Option<TaskSpec> {
+/// 默认提及正则表达式 (静态缓存, 用于 parse_mention)
+fn default_mention_regex() -> &'static Regex {
     use std::sync::OnceLock;
     static MENTION_RE: OnceLock<Regex> = OnceLock::new();
-    static ISSUE_RE: OnceLock<Regex> = OnceLock::new();
-    // 查找 @devnpc 提及
-    let re = MENTION_RE.get_or_init(|| {
+    MENTION_RE.get_or_init(|| {
         Regex::new(r"@devnpc\s*(.*)").expect("静态 Regex 编译失败 (MENTION_RE)")
-    });
+    })
+}
+
+/// Issue 引用正则表达式 (#42), 静态缓存
+fn issue_ref_regex() -> &'static Regex {
+    use std::sync::OnceLock;
+    static ISSUE_RE: OnceLock<Regex> = OnceLock::new();
+    ISSUE_RE.get_or_init(|| {
+        Regex::new(r"#(\d+)").expect("静态 Regex 编译失败 (ISSUE_RE)")
+    })
+}
+
+/// 使用指定正则表达式从评论中提取任务 (内部共享逻辑)
+fn parse_mention_with_regex(body: &str, re: &Regex) -> Option<TaskSpec> {
     let caps = re.captures(body)?;
     let text = caps.get(1)?.as_str().trim();
     if text.is_empty() {
@@ -49,9 +60,7 @@ pub fn parse_mention(body: &str) -> Option<TaskSpec> {
     let kind = classify_task(text);
 
     // 检测目标 Issue (#42) 引用
-    let issue_re = ISSUE_RE.get_or_init(|| {
-        Regex::new(r"#(\d+)").expect("静态 Regex 编译失败 (ISSUE_RE)")
-    });
+    let issue_re = issue_ref_regex();
     let target_issue = issue_re
         .captures(text)
         .and_then(|c| c[1].parse().ok());
@@ -62,6 +71,28 @@ pub fn parse_mention(body: &str) -> Option<TaskSpec> {
         target_issue,
         acceptance_criteria: Vec::new(),
     })
+}
+
+/// 从评论中查找 @devnpc 提及并解析任务 (使用默认正则表达式)
+///
+/// 生产代码应优先使用 [`parse_mention_with_pattern`], 传入 `TriggerConfig.mention_regex`。
+pub fn parse_mention(body: &str) -> Option<TaskSpec> {
+    parse_mention_with_regex(body, default_mention_regex())
+}
+
+/// 从评论中查找提及并解析任务 (使用配置的正则表达式)
+///
+/// `mention_pattern` 来自 `TriggerConfig.mention_regex`, 允许自定义触发关键词。
+/// 编译失败时回退到默认正则表达式。
+pub fn parse_mention_with_pattern(body: &str, mention_pattern: &str) -> Option<TaskSpec> {
+    let re = Regex::new(mention_pattern).unwrap_or_else(|_| {
+        tracing::warn!(
+            pattern = mention_pattern,
+            "mention_regex 编译失败, 回退到默认 @devnpc 提及正则"
+        );
+        default_mention_regex().clone()
+    });
+    parse_mention_with_regex(body, &re)
 }
 
 /// 根据关键字识别任务类型

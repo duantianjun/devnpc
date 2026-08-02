@@ -180,12 +180,16 @@ impl TrajectoryCollector {
     }
 
     /// 从 Trajectory + CiOutcome 构建 ReportData
+    ///
+    /// `cost_config` 用于覆盖默认的 token 估算值与费率;
+    /// 传入 `None` 时回退到硬编码 (500 input / 200 output per call)。
     pub fn build_report(
         trajectory: &Trajectory,
         outcome: &CiOutcome,
         task_description: &str,
         start_time: chrono::DateTime<Utc>,
         end_time: chrono::DateTime<Utc>,
+        cost_config: Option<&crate::config::CostConfig>,
     ) -> ReportData {
         let mut llm_calls = 0u32;
         let mut tool_calls = 0u32;
@@ -226,14 +230,30 @@ impl TrajectoryCollector {
             }
         }
 
-        // 估算 token (粗略: 假设每次 LLM call ~500 input + ~200 output)
-        let input_tokens = llm_calls as u64 * 500;
-        let output_tokens = llm_calls as u64 * 200;
-        let estimated_cost_usd =
-            crate::adapter::orchestrator::UsageStats::estimate_cost(
-                input_tokens as i64,
-                output_tokens as i64,
-            );
+        // 估算 token: 优先使用 cost_config, 否则回退到硬编码 (500 input + 200 output per call)
+        let (input_tokens, output_tokens, estimated_cost_usd) = match cost_config {
+            Some(cfg) => {
+                let in_tok = llm_calls as u64 * cfg.est_input_tokens_per_call;
+                let out_tok = llm_calls as u64 * cfg.est_output_tokens_per_call;
+                let cost = crate::adapter::orchestrator::UsageStats::estimate_cost_with_rates(
+                    in_tok as i64,
+                    out_tok as i64,
+                    cfg.input_rate,
+                    cfg.output_rate,
+                );
+                (in_tok, out_tok, cost)
+            }
+            None => {
+                // 默认回退: 500 input + 200 output per call
+                let in_tok = llm_calls as u64 * 500;
+                let out_tok = llm_calls as u64 * 200;
+                let cost = crate::adapter::orchestrator::UsageStats::estimate_cost(
+                    in_tok as i64,
+                    out_tok as i64,
+                );
+                (in_tok, out_tok, cost)
+            }
+        };
 
         let duration_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
@@ -337,7 +357,7 @@ mod tests {
         let start = Utc::now();
         let end = start + chrono::Duration::seconds(30);
 
-        let report = TrajectoryCollector::build_report(&traj, &outcome, "修复登录 bug", start, end);
+        let report = TrajectoryCollector::build_report(&traj, &outcome, "修复登录 bug", start, end, None);
 
         assert_eq!(report.status, "passed");
         assert_eq!(report.llm_calls, 2);
@@ -359,7 +379,7 @@ mod tests {
         };
         let start = Utc::now();
         let end = start;
-        let report = TrajectoryCollector::build_report(&traj, &outcome, "test", start, end);
+        let report = TrajectoryCollector::build_report(&traj, &outcome, "test", start, end, None);
         assert!(report.status.contains("failed"));
         assert_eq!(report.ci_retries, 2);
     }
@@ -373,7 +393,7 @@ mod tests {
         };
         let start = Utc::now();
         let end = start;
-        let report = TrajectoryCollector::build_report(&traj, &outcome, "test", start, end);
+        let report = TrajectoryCollector::build_report(&traj, &outcome, "test", start, end, None);
         assert!(report.status.contains("timeout"));
     }
 

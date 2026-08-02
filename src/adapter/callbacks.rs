@@ -10,26 +10,14 @@ use adk_rust::CallbackContext;
 
 use crate::config::SopMode;
 
-/// 默认允许的工具列表 (SOP 严格模式白名单)
-const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
-    "read_file",
-    "write_file",
-    "edit_file",
-    "delete_file",
-    "list_files",
-    "search_files",
-    "grep_files",
-    "run_command",
-    "aft_outline",
-    "aft_view_symbol",
-    "aft_edit_symbol",
-    "aft_search_symbols",
-    "aft_ast_replace",
-];
-
 /// 检查工具是否在 SOP 允许列表中 (严格模式白名单)
-pub fn is_tool_allowed(tool_name: &str) -> bool {
-    DEFAULT_ALLOWED_TOOLS.contains(&tool_name)
+///
+/// 使用 `allowed_tools` 列表校验, 空列表表示允许全部工具。
+pub fn is_tool_allowed(tool_name: &str, allowed_tools: &[String]) -> bool {
+    if allowed_tools.is_empty() {
+        return true;
+    }
+    allowed_tools.iter().any(|t| t == tool_name)
 }
 
 /// 检查路径是否命中禁止路径列表
@@ -51,14 +39,22 @@ pub fn is_forbidden_path(path: &str, forbidden_paths: &[String]) -> bool {
 pub struct DevnpcCallbacks {
     sop_mode: SopMode,
     forbidden_paths: Vec<String>,
+    allowed_tools: Vec<String>,
 }
 
 impl DevnpcCallbacks {
     /// 创建新的回调处理器
-    pub fn new(sop_mode: SopMode, forbidden_paths: Vec<String>) -> Self {
+    ///
+    /// `allowed_tools` 为 SOP 严格模式工具白名单 (来自 `ToolsConfig.allowed_tools`)。
+    pub fn new(
+        sop_mode: SopMode,
+        forbidden_paths: Vec<String>,
+        allowed_tools: Vec<String>,
+    ) -> Self {
         Self {
             sop_mode,
             forbidden_paths,
+            allowed_tools,
         }
     }
 
@@ -82,14 +78,16 @@ impl DevnpcCallbacks {
     ) -> adk_rust::BeforeToolCallback {
         let sop_mode = self.sop_mode;
         let forbidden_paths = self.forbidden_paths.clone();
+        let allowed_tools = self.allowed_tools.clone();
         Box::new(move |ctx: Arc<dyn CallbackContext>| {
             let fp = forbidden_paths.clone();
+            let at = allowed_tools.clone();
             Box::pin(async move {
                 // SOP 偏离检测
                 if let Some(tool_name) = ctx.tool_name() {
                     match sop_mode {
                         SopMode::Strict => {
-                            if !is_tool_allowed(tool_name) {
+                            if !is_tool_allowed(tool_name, &at) {
                                 tracing::warn!(
                                     tool = %tool_name,
                                     "SOP 偏离警告: 使用未授权工具 (严格模式)"
@@ -143,7 +141,7 @@ impl DevnpcCallbacks {
 
 impl Default for DevnpcCallbacks {
     fn default() -> Self {
-        Self::new(SopMode::Soft, Vec::new())
+        Self::new(SopMode::Soft, Vec::new(), Vec::new())
     }
 }
 
@@ -153,24 +151,33 @@ mod tests {
 
     #[test]
     fn test_is_tool_allowed_default_whitelist() {
+        let whitelist: Vec<String> = crate::config::default_allowed_tools_list();
         // 白名单内工具
-        assert!(is_tool_allowed("read_file"));
-        assert!(is_tool_allowed("write_file"));
-        assert!(is_tool_allowed("run_command"));
-        assert!(is_tool_allowed("aft_outline"));
-        assert!(is_tool_allowed("aft_view_symbol"));
-        assert!(is_tool_allowed("aft_edit_symbol"));
-        assert!(is_tool_allowed("aft_search_symbols"));
-        assert!(is_tool_allowed("aft_ast_replace"));
+        assert!(is_tool_allowed("read_file", &whitelist));
+        assert!(is_tool_allowed("write_file", &whitelist));
+        assert!(is_tool_allowed("run_command", &whitelist));
+        assert!(is_tool_allowed("aft_outline", &whitelist));
+        assert!(is_tool_allowed("aft_view_symbol", &whitelist));
+        assert!(is_tool_allowed("aft_edit_symbol", &whitelist));
+        assert!(is_tool_allowed("aft_search_symbols", &whitelist));
+        assert!(is_tool_allowed("aft_ast_replace", &whitelist));
     }
 
     #[test]
     fn test_is_tool_allowed_rejects_unknown() {
+        let whitelist: Vec<String> = crate::config::default_allowed_tools_list();
         // 不在白名单
-        assert!(!is_tool_allowed("rm_rf"));
-        assert!(!is_tool_allowed("shell_inject"));
-        assert!(!is_tool_allowed(""));
-        assert!(!is_tool_allowed("unknown_tool"));
+        assert!(!is_tool_allowed("rm_rf", &whitelist));
+        assert!(!is_tool_allowed("shell_inject", &whitelist));
+        assert!(!is_tool_allowed("", &whitelist));
+        assert!(!is_tool_allowed("unknown_tool", &whitelist));
+    }
+
+    #[test]
+    fn test_is_tool_allowed_empty_list_allows_all() {
+        // 空白名单 → 允许全部
+        assert!(is_tool_allowed("anything", &[]));
+        assert!(is_tool_allowed("rm_rf", &[]));
     }
 
     #[test]
@@ -197,14 +204,14 @@ mod tests {
 
     #[test]
     fn test_callbacks_new_strict_mode() {
-        let cb = DevnpcCallbacks::new(SopMode::Strict, vec!["/secret".into()]);
+        let cb = DevnpcCallbacks::new(SopMode::Strict, vec!["/secret".into()], vec![]);
         assert!(matches!(cb.sop_mode(), SopMode::Strict));
         assert_eq!(cb.forbidden_paths(), &["/secret".to_string()]);
     }
 
     #[test]
     fn test_callbacks_new_soft_mode() {
-        let cb = DevnpcCallbacks::new(SopMode::Soft, vec![]);
+        let cb = DevnpcCallbacks::new(SopMode::Soft, vec![], vec![]);
         assert!(matches!(cb.sop_mode(), SopMode::Soft));
         assert!(cb.forbidden_paths().is_empty());
     }
@@ -219,7 +226,7 @@ mod tests {
     #[test]
     fn test_before_tool_callback_returns_closure() {
         // 验证闭包可成功构建
-        let cb = DevnpcCallbacks::new(SopMode::Strict, vec!["/secret".into()]);
+        let cb = DevnpcCallbacks::new(SopMode::Strict, vec!["/secret".into()], vec![]);
         let _closure = cb.before_tool_callback();
         let _after_closure = cb.after_model_callback();
         // 构造成功即验证 (闭包类型不便于直接断言)
@@ -256,7 +263,7 @@ mod tests {
             fn tool_input(&self) -> Option<&serde_json::Value> { self.tool_input.as_ref() }
         }
 
-        let cb = DevnpcCallbacks::new(SopMode::Soft, vec!["/secret".into()]);
+        let cb = DevnpcCallbacks::new(SopMode::Soft, vec!["/secret".into()], vec![]);
         let closure = cb.before_tool_callback();
 
         let ctx: Arc<dyn CallbackContext> = Arc::new(MockCtx {
@@ -299,7 +306,7 @@ mod tests {
             fn tool_input(&self) -> Option<&serde_json::Value> { self.tool_input.as_ref() }
         }
 
-        let cb = DevnpcCallbacks::new(SopMode::Strict, vec![]);
+        let cb = DevnpcCallbacks::new(SopMode::Strict, vec![], vec![]);
         let closure = cb.before_tool_callback();
 
         // 未知工具 (不在白名单) → 严格模式下记录警告,但仍然返回 Ok(None)
@@ -343,7 +350,7 @@ mod tests {
             fn tool_input(&self) -> Option<&serde_json::Value> { self.tool_input.as_ref() }
         }
 
-        let cb = DevnpcCallbacks::new(SopMode::Soft, vec!["/secret".into()]);
+        let cb = DevnpcCallbacks::new(SopMode::Soft, vec!["/secret".into()], vec![]);
         let closure = cb.before_tool_callback();
 
         // 工具输入含禁止路径 → 记录警告但不阻断
@@ -384,7 +391,7 @@ mod tests {
             // tool_name 和 tool_input 使用默认实现 (返回 None)
         }
 
-        let cb = DevnpcCallbacks::new(SopMode::Strict, vec!["/secret".into()]);
+        let cb = DevnpcCallbacks::new(SopMode::Strict, vec!["/secret".into()], vec![]);
         let closure = cb.before_tool_callback();
 
         // 无 tool_name (非工具执行上下文) → 回调安全返回

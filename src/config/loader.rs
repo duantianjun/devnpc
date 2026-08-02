@@ -48,6 +48,7 @@ fn project_config_from_front_matter(
             .unwrap_or_else(|| "npc".to_string()),
         max_ci_retries: fm.max_ci_retries,
         guidelines_markdown: guidelines,
+        ..Default::default()
     }
 }
 
@@ -110,6 +111,12 @@ fn load_internal(
     };
     if let Some(mode) = env::get_sop_mode(sop_mode_var)? {
         project.sop_mode = mode;
+    }
+    // 主 Agent 系统指令 (环境变量覆盖)
+    if let Some(instr) = env::get_optional("DEVNPC_MAIN_INSTRUCTION")
+        && !instr.is_empty()
+    {
+        project.main_instruction = instr;
     }
     let report_target = env::get_report_target(report_target_var)?.unwrap_or(ReportTarget::Artifact);
     let model_routing = env::get_model_routing(model_routing_var)?.unwrap_or_default();
@@ -178,7 +185,7 @@ fn load_internal(
             api_key,
             base_url,
             model,
-            provider: "deepseek".to_string(),
+            provider: env::get_or_default("DEVNPC_PROVIDER", "deepseek"),
         },
         gitlab: GitlabConfig {
             url: gitlab_url,
@@ -193,6 +200,7 @@ fn load_internal(
         model_routing,
         report: ReportConfig {
             target: report_target,
+            ..Default::default()
         },
         command,
         read_file,
@@ -212,6 +220,8 @@ fn load_internal(
                 .map(|v| v == "true")
                 .unwrap_or(false),
             db_path: env::get_or_default("DEVNPC_MEMORY_DB_PATH", ".devnpc-memory.db"),
+            max_search_results: env::get_usize("DEVNPC_MEMORY_MAX_SEARCH_RESULTS")?
+                .unwrap_or(10),
         },
         npc_config: crate::config::NpcConfigSection {
             enabled: env::get_optional("DEVNPC_NPC_CONFIG_ENABLED")
@@ -229,6 +239,50 @@ fn load_internal(
                 .unwrap_or(8080),
             secret: env::get_or_default("DEVNPC_WEBHOOK_SECRET", ""),
             path: env::get_or_default("DEVNPC_WEBHOOK_PATH", "/webhook"),
+            channel_buffer_size: env::get_usize("DEVNPC_WEBHOOK_CHANNEL_BUFFER")?
+                .unwrap_or(32),
+        },
+        cost: crate::config::CostConfig {
+            input_rate: env::get_f64("DEVNPC_COST_INPUT_RATE")?
+                .unwrap_or(0.000_001_5),
+            output_rate: env::get_f64("DEVNPC_COST_OUTPUT_RATE")?
+                .unwrap_or(0.000_002_0),
+            est_input_tokens_per_call: env::get_u64("DEVNPC_COST_EST_INPUT_TOKENS")?
+                .unwrap_or(500),
+            est_output_tokens_per_call: env::get_u64("DEVNPC_COST_EST_OUTPUT_TOKENS")?
+                .unwrap_or(200),
+        },
+        tools: crate::config::ToolsConfig {
+            max_symbol_depth: env::get_usize("DEVNPC_TOOLS_MAX_SYMBOL_DEPTH")?
+                .unwrap_or(20),
+            max_file_depth: env::get_usize("DEVNPC_TOOLS_MAX_FILE_DEPTH")?
+                .unwrap_or(10),
+            ignore_dirs: env::get_vec("DEVNPC_TOOLS_IGNORE_DIRS")
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| {
+                    vec![
+                        "target".to_string(),
+                        ".git".to_string(),
+                        "node_modules".to_string(),
+                    ]
+                }),
+            allowed_tools: env::get_vec("DEVNPC_TOOLS_ALLOWED_TOOLS")
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(crate::config::default_allowed_tools_list),
+        },
+        trigger: crate::config::TriggerConfig {
+            mention_regex: env::get_or_default(
+                "DEVNPC_TRIGGER_MENTION_REGEX",
+                r"@devnpc\s*(.*)",
+            ),
+            ci_mr_iid_var: env::get_or_default(
+                "DEVNPC_TRIGGER_CI_MR_IID_VAR",
+                "CI_MERGE_REQUEST_IID",
+            ),
+            ci_issue_iid_var: env::get_or_default(
+                "DEVNPC_TRIGGER_CI_ISSUE_IID_VAR",
+                "CI_ISSUE_IID",
+            ),
         },
     })
 }

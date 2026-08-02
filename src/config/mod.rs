@@ -181,6 +181,12 @@ pub struct Config {
     pub npc_config: NpcConfigSection,
     /// Webhook 服务器配置 (trigger/webhook.rs)
     pub webhook: WebhookConfig,
+    /// 成本估算配置 (orchestrator.rs / collector.rs / main.rs)
+    pub cost: CostConfig,
+    /// AFT 代码感知工具配置 (adapter/tools.rs)
+    pub tools: ToolsConfig,
+    /// 触发源配置 (trigger/parser.rs / main.rs)
+    pub trigger: TriggerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -229,7 +235,7 @@ pub enum SopMode {
 }
 
 /// .devnpc.md 解析结果
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProjectConfig {
     pub sop_mode: SopMode,
     pub forbidden_paths: Vec<String>,
@@ -237,11 +243,48 @@ pub struct ProjectConfig {
     pub branch_prefix: String,
     pub max_ci_retries: Option<u8>,
     pub guidelines_markdown: String,
+    /// 默认 Git 分支名 (用于读取仓库文件,默认 "main")
+    pub default_branch: String,
+    /// 创建 MR 时的目标分支 (默认 "main")
+    pub target_branch: String,
+    /// 主 Agent 系统指令 (可通过 DEVNPC_MAIN_INSTRUCTION 环境变量覆盖)
+    pub main_instruction: String,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            sop_mode: SopMode::default(),
+            forbidden_paths: Vec::new(),
+            required_checks: Vec::new(),
+            branch_prefix: "npc".to_string(),
+            max_ci_retries: None,
+            guidelines_markdown: String::new(),
+            default_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            main_instruction: default_main_instruction(),
+        }
+    }
+}
+
+/// 默认主 Agent 系统指令
+pub fn default_main_instruction() -> String {
+    "你是一个软件开发工程师。使用 devnpc 工具链完成研发任务。\n\
+     遵循以下原则:\n\
+     1. 修改前先理解上下文 (read_file / list_files / aft_outline)\n\
+     2. 改完后用对应的构建工具验证编译 (如 cargo build / mvn compile / gradle build / npm run build 等)\n\
+     3. 完成后总结你的工作成果\n\
+     4. 禁止修改工作目录外的文件"
+        .to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReportConfig {
     pub target: ReportTarget,
+    /// 报告输出目录 (默认 ".devnpc-report")
+    pub output_dir: String,
+    /// 报告文件名 (默认 "report.html")
+    pub output_file: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -256,6 +299,8 @@ impl Default for ReportConfig {
     fn default() -> Self {
         Self {
             target: ReportTarget::Artifact,
+            output_dir: ".devnpc-report".to_string(),
+            output_file: "report.html".to_string(),
         }
     }
 }
@@ -281,12 +326,24 @@ pub struct McpConfig {
 }
 
 /// 长期记忆配置
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MemoryConfig {
     /// 是否启用长期记忆
     pub enabled: bool,
     /// SQLite 存储路径 (默认 ".devnpc-memory.db")
     pub db_path: String,
+    /// 搜索任务记录/修复经验时返回的最大条数 (默认 10)
+    pub max_search_results: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            db_path: ".devnpc-memory.db".to_string(),
+            max_search_results: 10,
+        }
+    }
 }
 
 /// npc-config 角色与 SOP 配置
@@ -311,7 +368,7 @@ impl Default for NpcConfigSection {
 ///
 /// 用于接收 GitLab webhook 事件 (Note/MergeRequest/Issue),自动触发任务执行。
 /// 替代 `@devnpc` 评论轮询模式,减少触发延迟。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WebhookConfig {
     /// 是否启用 webhook 服务器 (默认 false,仅在 `serve` 子命令时启动)
     pub enabled: bool,
@@ -323,6 +380,107 @@ pub struct WebhookConfig {
     pub secret: String,
     /// webhook 路径 (默认 "/webhook")
     pub path: String,
+    /// 触发事件 channel 缓冲区大小 (默认 32)
+    pub channel_buffer_size: usize,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            secret: String::new(),
+            path: "/webhook".to_string(),
+            channel_buffer_size: 32,
+        }
+    }
+}
+
+/// 成本估算配置 (orchestrator.rs / collector.rs / main.rs)
+#[derive(Debug, Clone, Deserialize)]
+pub struct CostConfig {
+    /// 默认 input token 费率 (USD/token, 默认 $1.5/M = 0.0000015)
+    pub input_rate: f64,
+    /// 默认 output token 费率 (USD/token, 默认 $2.0/M = 0.0000020)
+    pub output_rate: f64,
+    /// 回退估算: 每次 LLM 调用假设的 input token 数 (默认 500)
+    pub est_input_tokens_per_call: u64,
+    /// 回退估算: 每次 LLM 调用假设的 output token 数 (默认 200)
+    pub est_output_tokens_per_call: u64,
+}
+
+impl Default for CostConfig {
+    fn default() -> Self {
+        Self {
+            input_rate: 0.000_001_5,
+            output_rate: 0.000_002_0,
+            est_input_tokens_per_call: 500,
+            est_output_tokens_per_call: 200,
+        }
+    }
+}
+
+/// AFT 代码感知工具配置 (adapter/tools.rs)
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolsConfig {
+    /// AST 符号收集/查找的递归最大深度 (默认 20)
+    pub max_symbol_depth: usize,
+    /// 源码文件收集的递归最大深度 (默认 10)
+    pub max_file_depth: usize,
+    /// 文件收集时跳过的目录名 (默认 ["target", ".git", "node_modules"])
+    pub ignore_dirs: Vec<String>,
+    /// SOP 严格模式允许的工具白名单 (默认全部业务工具)
+    pub allowed_tools: Vec<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            max_symbol_depth: 20,
+            max_file_depth: 10,
+            ignore_dirs: vec![
+                "target".to_string(),
+                ".git".to_string(),
+                "node_modules".to_string(),
+            ],
+            allowed_tools: default_allowed_tools_list(),
+        }
+    }
+}
+
+/// 默认 SOP 允许工具列表 (用于 loader.rs fallback 和 ToolsConfig::default)
+pub fn default_allowed_tools_list() -> Vec<String> {
+    [
+        "read_file", "write_file", "edit_file", "delete_file",
+        "list_files", "search_files", "grep_files", "run_command",
+        "aft_outline", "aft_view_symbol", "aft_edit_symbol",
+        "aft_search_symbols", "aft_ast_replace",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// 触发源配置 (trigger/parser.rs / main.rs)
+#[derive(Debug, Clone, Deserialize)]
+pub struct TriggerConfig {
+    /// @devnpc 提及的正则表达式 (默认 r"@devnpc\s*(.*)")
+    pub mention_regex: String,
+    /// CI 环境变量名: MR IID (默认 "CI_MERGE_REQUEST_IID")
+    pub ci_mr_iid_var: String,
+    /// CI 环境变量名: Issue IID (默认 "CI_ISSUE_IID")
+    pub ci_issue_iid_var: String,
+}
+
+impl Default for TriggerConfig {
+    fn default() -> Self {
+        Self {
+            mention_regex: r"@devnpc\s*(.*)".to_string(),
+            ci_mr_iid_var: "CI_MERGE_REQUEST_IID".to_string(),
+            ci_issue_iid_var: "CI_ISSUE_IID".to_string(),
+        }
+    }
 }
 
 impl Config {

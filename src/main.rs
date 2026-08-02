@@ -20,7 +20,7 @@ use devnpc::gitlab_api::GitlabApi;
 use devnpc::memory::context::Context;
 use devnpc::report::collector::{CostEstimate, ReportData, Trajectory, TrajectoryEvent, TrajectorySummary};
 use devnpc::report::publisher;
-use devnpc::trigger::parser::{classify_task, parse_mention, Trigger};
+use devnpc::trigger::parser::{classify_task, parse_mention_with_pattern, Trigger};
 
 /// devnpc - 基于 GitLab 的企业级研发流程 AI 智能体
 #[derive(Parser, Debug)]
@@ -83,15 +83,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// 系统指令 (通用开发工程师角色)
-const SYSTEM_INSTRUCTION: &str = "\
-你是一个软件开发工程师。使用 devnpc 工具链完成研发任务。\n\
-遵循以下原则:\n\
-1. 修改前先理解上下文 (read_file / list_files / aft_outline)\n\
-2. 改完后用对应的构建工具验证编译 (如 cargo build / mvn compile / gradle build / npm run build 等)\n\
-3. 完成后总结你的工作成果\n\
-4. 禁止修改工作目录外的文件";
-
 /// Webhook 服务器模式
 ///
 /// 启动 axum HTTP 服务器监听 GitLab webhook 事件。
@@ -118,7 +109,7 @@ async fn serve(port_override: Option<u16>, host_override: Option<String>) -> Res
         );
     }
 
-    let (handle, mut receiver) = devnpc::trigger::webhook::start_server(&config.webhook)
+    let (handle, mut receiver) = devnpc::trigger::webhook::start_server(&config.webhook, &config.trigger.mention_regex)
         .await
         .map_err(|e| devnpc::error::DevnpcError::Config(format!("Webhook 服务器启动失败: {e}")))?;
 
@@ -216,7 +207,7 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     };
 
     // 4. 解析触发源
-    let trigger = parse_trigger(task, &*gitlab, config.gitlab.project_id).await?;
+    let trigger = parse_trigger(task, &*gitlab, config.gitlab.project_id, &config.trigger).await?;
     tracing::info!(?trigger, "触发源解析结果");
 
     // 5-8. 根据触发类型执行
@@ -281,15 +272,16 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     )?;
     let sub_tools = tools.clone();
 
-    // 创建回调 (注入 SOP 配置)
+    // 创建回调 (注入 SOP 配置 + 工具白名单)
     let callbacks = DevnpcCallbacks::new(
         config.project.sop_mode,
         config.project.forbidden_paths.clone(),
+        config.tools.allowed_tools.clone(),
     );
 
     // 构建主 Agent
     let agent = LlmAgentBuilder::new("devnpc")
-        .instruction(SYSTEM_INSTRUCTION)
+        .instruction(config.project.main_instruction.clone())
         .model(model.clone())
         .before_tool_callback(callbacks.before_tool_callback())
         .after_model_callback(callbacks.after_model_callback());
@@ -308,7 +300,10 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
 
     // 初始化长期记忆
     let memory_store = if config.memory.enabled {
-        let store = devnpc::adapter::memory::MemoryStore::new(config.memory.clone());
+        let store = devnpc::adapter::memory::MemoryStore::new(
+            config.memory.clone(),
+            config.memory.max_search_results,
+        );
         if let Err(e) = store.initialize() {
             tracing::warn!(error = %e, "记忆存储初始化失败");
         }
@@ -638,9 +633,10 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         end_time,
         &usage_stats,
         &team_steps_for_report,
+        &config.cost,
     );
     let html = devnpc::report::html::generate_html(&report_data);
-    let report_url = publisher::publish(&html, &config.report.target).await?;
+    let report_url = publisher::publish(&html, &config.report.target, &config.report).await?;
     tracing::info!(report_url = %report_url, "报告已发布");
 
     // 9. 评论 MR 或输出结果
@@ -668,6 +664,7 @@ async fn parse_trigger(
     task: Option<&str>,
     gitlab: &dyn GitlabApi,
     project_id: u64,
+    trigger_config: &devnpc::config::TriggerConfig,
 ) -> Result<Trigger> {
     if let Some(task_str) = task {
         // 手动触发
@@ -681,16 +678,17 @@ async fn parse_trigger(
     }
 
     // CI 环境变量: MR 评论
-    if let Ok(mr_iid_str) = std::env::var("CI_MERGE_REQUEST_IID") {
+    if let Ok(mr_iid_str) = std::env::var(&trigger_config.ci_mr_iid_var) {
         let mr_iid: u64 = mr_iid_str.parse().map_err(|e| {
             devnpc::error::DevnpcError::Config(format!(
-                "CI_MERGE_REQUEST_IID 不是有效数字: {mr_iid_str}, {e}"
+                "{} 不是有效数字: {mr_iid_str}, {e}",
+                trigger_config.ci_mr_iid_var
             ))
         })?;
         let notes = gitlab.get_mr_notes(project_id, mr_iid).await?;
         // 找到最新 @devnpc 提及
         for note in notes.iter().rev() {
-            if let Some(task_spec) = parse_mention(&note.body) {
+            if let Some(task_spec) = parse_mention_with_pattern(&note.body, &trigger_config.mention_regex) {
                 return Ok(Trigger::MrTask { mr_iid, task: task_spec });
             }
         }
@@ -698,15 +696,16 @@ async fn parse_trigger(
     }
 
     // CI 环境变量: Issue 评论
-    if let Ok(issue_iid_str) = std::env::var("CI_ISSUE_IID") {
+    if let Ok(issue_iid_str) = std::env::var(&trigger_config.ci_issue_iid_var) {
         let issue_iid: u64 = issue_iid_str.parse().map_err(|e| {
             devnpc::error::DevnpcError::Config(format!(
-                "CI_ISSUE_IID 不是有效数字: {issue_iid_str}, {e}"
+                "{} 不是有效数字: {issue_iid_str}, {e}",
+                trigger_config.ci_issue_iid_var
             ))
         })?;
         let notes = gitlab.get_issue_notes(project_id, issue_iid).await?;
         for note in notes.iter().rev() {
-            if let Some(task_spec) = parse_mention(&note.body) {
+            if let Some(task_spec) = parse_mention_with_pattern(&note.body, &trigger_config.mention_regex) {
                 return Ok(Trigger::IssueTask { issue_iid, task: task_spec });
             }
         }
@@ -740,7 +739,7 @@ async fn run_ci_controller(
     // 创建 MR (如果当前没有关联 MR)
     let create_req = devnpc::gitlab_api::CreateMrReq {
         source_branch: branch.to_string(),
-        target_branch: "main".to_string(),
+        target_branch: config.project.target_branch.clone(),
         title: format!("devnpc: {}", summary),
         description: format!("由 devnpc 自动创建的 MR\n\n## 摘要\n{}", summary),
         draft: true,
@@ -813,6 +812,7 @@ fn build_report(
     end_time: chrono::DateTime<chrono::Utc>,
     usage_stats: &devnpc::adapter::orchestrator::UsageStats,
     team_steps: &[devnpc::report::collector::TeamStepSummary],
+    cost_config: &devnpc::config::CostConfig,
 ) -> ReportData {
     let llm_calls = trajectory
         .events
@@ -890,11 +890,13 @@ fn build_report(
         } else {
             // 回退: trajectory 事件计数 * 平均 token 估算 (兼容 provider 未返回 usage 的场景)
             tracing::warn!("Orchestrator 未累积到 usage_metadata, 回退到固定估算");
-            let in_tok = llm_calls as u64 * 500;
-            let out_tok = llm_calls as u64 * 200;
-            let cost = devnpc::adapter::orchestrator::UsageStats::estimate_cost(
+            let in_tok = llm_calls as u64 * cost_config.est_input_tokens_per_call;
+            let out_tok = llm_calls as u64 * cost_config.est_output_tokens_per_call;
+            let cost = devnpc::adapter::orchestrator::UsageStats::estimate_cost_with_rates(
                 in_tok as i64,
                 out_tok as i64,
+                cost_config.input_rate,
+                cost_config.output_rate,
             );
             (in_tok, out_tok, cost, llm_calls as u64)
         };

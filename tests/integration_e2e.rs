@@ -338,8 +338,9 @@ async fn test_memory_store_e2e_save_and_retrieve() {
     let config = MemoryConfig {
         enabled: true,
         db_path: ":memory:".to_string(),
+        max_search_results: 10,
     };
-    let store = MemoryStore::new(config);
+    let store = MemoryStore::new(config, 10);
     store.initialize().expect("初始化失败");
 
     // 保存任务记录
@@ -383,8 +384,9 @@ async fn test_memory_store_disabled_does_nothing() {
     let config = MemoryConfig {
         enabled: false,
         db_path: ":memory:".to_string(),
+        max_search_results: 10,
     };
-    let store = MemoryStore::new(config);
+    let store = MemoryStore::new(config, 10);
 
     // 禁用状态下所有操作都应是空操作
     let results = store.retrieve_relevant("任何任务").expect("不应报错");

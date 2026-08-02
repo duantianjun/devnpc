@@ -119,8 +119,23 @@ impl UsageStats {
     /// 按默认费率估算成本 (USD)
     /// 用于回退场景: provider 未返回 usage_metadata,仅有 token 数估算
     pub fn estimate_cost(input_tokens: i64, output_tokens: i64) -> f64 {
-        (input_tokens as f64 * Self::DEFAULT_INPUT_RATE)
-            + (output_tokens as f64 * Self::DEFAULT_OUTPUT_RATE)
+        Self::estimate_cost_with_rates(
+            input_tokens,
+            output_tokens,
+            Self::DEFAULT_INPUT_RATE,
+            Self::DEFAULT_OUTPUT_RATE,
+        )
+    }
+
+    /// 按自定义费率估算成本 (USD)
+    /// 用于从 CostConfig 传入配置的费率
+    pub fn estimate_cost_with_rates(
+        input_tokens: i64,
+        output_tokens: i64,
+        input_rate: f64,
+        output_rate: f64,
+    ) -> f64 {
+        (input_tokens as f64 * input_rate) + (output_tokens as f64 * output_rate)
     }
 }
 

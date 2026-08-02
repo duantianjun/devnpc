@@ -12,13 +12,14 @@ use crate::gitlab_api::{GitlabApi, RepoTreeEntry};
 /// 默认分支名 (未指定 ref 时使用)
 pub const DEFAULT_REF: &str = "main";
 
-/// 读取仓库文件内容 (使用默认 ref=main)
+/// 读取仓库文件内容 (使用默认 ref)
 pub async fn read_file(
     gitlab: &dyn GitlabApi,
     project_id: u64,
     file_path: &str,
+    default_ref: &str,
 ) -> Result<String> {
-    gitlab.get_file(project_id, file_path, DEFAULT_REF).await
+    gitlab.get_file(project_id, file_path, default_ref).await
 }
 
 /// 读取仓库文件内容 (指定 ref)
@@ -31,14 +32,23 @@ pub async fn read_file_at(
     gitlab.get_file(project_id, file_path, ref_).await
 }
 
-/// 列出根目录树 (使用默认 ref=main)
-pub async fn list_root_tree(gitlab: &dyn GitlabApi, project_id: u64) -> Result<Vec<RepoTreeEntry>> {
-    gitlab.list_tree(project_id, "", DEFAULT_REF).await
+/// 列出根目录树 (使用默认 ref)
+pub async fn list_root_tree(
+    gitlab: &dyn GitlabApi,
+    project_id: u64,
+    default_ref: &str,
+) -> Result<Vec<RepoTreeEntry>> {
+    gitlab.list_tree(project_id, "", default_ref).await
 }
 
-/// 列出指定路径下的目录树 (使用默认 ref=main)
-pub async fn list_path(gitlab: &dyn GitlabApi, project_id: u64, path: &str) -> Result<Vec<RepoTreeEntry>> {
-    gitlab.list_tree(project_id, path, DEFAULT_REF).await
+/// 列出指定路径下的目录树 (使用默认 ref)
+pub async fn list_path(
+    gitlab: &dyn GitlabApi,
+    project_id: u64,
+    path: &str,
+    default_ref: &str,
+) -> Result<Vec<RepoTreeEntry>> {
+    gitlab.list_tree(project_id, path, default_ref).await
 }
 
 /// 从树条目中过滤出文件 (type=blob)
@@ -168,7 +178,7 @@ mod tests {
             tree: vec![],
             file_calls: Mutex::new(0),
         };
-        let content = read_file(&mock, 1, "README.md").await.unwrap();
+        let content = read_file(&mock, 1, "README.md", DEFAULT_REF).await.unwrap();
         assert_eq!(content, "# Test\n");
     }
 
@@ -195,7 +205,7 @@ mod tests {
             ],
             file_calls: Mutex::new(0),
         };
-        let entries = list_root_tree(&mock, 1).await.unwrap();
+        let entries = list_root_tree(&mock, 1, DEFAULT_REF).await.unwrap();
         assert_eq!(entries.len(), 2);
     }
 

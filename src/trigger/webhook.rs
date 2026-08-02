@@ -23,7 +23,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::config::WebhookConfig;
-use crate::trigger::parser::{parse_mention, TaskSpec};
+use crate::trigger::parser::{parse_mention_with_pattern, TaskSpec};
 
 /// Webhook 服务器共享状态
 #[derive(Clone)]
@@ -32,6 +32,8 @@ pub struct WebhookState {
     pub secret: Arc<String>,
     /// 触发事件发送端,接收端在 main 中消费并启动任务
     pub sender: mpsc::Sender<WebhookTrigger>,
+    /// @devnpc 提及正则表达式 (来自 TriggerConfig.mention_regex)
+    pub mention_regex: Arc<String>,
 }
 
 /// 从 webhook 解析出的触发任务
@@ -81,11 +83,13 @@ struct IssueRef {
 /// server_handle 可用于优雅关闭。
 pub async fn start_server(
     config: &WebhookConfig,
+    mention_regex: &str,
 ) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<WebhookTrigger>), std::io::Error> {
-    let (sender, receiver) = mpsc::channel::<WebhookTrigger>(32);
+    let (sender, receiver) = mpsc::channel::<WebhookTrigger>(config.channel_buffer_size);
     let state = WebhookState {
         secret: Arc::new(config.secret.clone()),
         sender,
+        mention_regex: Arc::new(mention_regex.to_string()),
     };
 
     let webhook_path = if config.path.is_empty() {
@@ -190,9 +194,9 @@ async fn handle_note_event(
         }
     };
 
-    // 解析 @devnpc 提及
+    // 解析 @devnpc 提及 (使用配置的 mention_regex)
     let body = &event.object_attributes.note;
-    let task = match parse_mention(body) {
+    let task = match parse_mention_with_pattern(body, &state.mention_regex) {
         Some(t) => t,
         None => {
             // 不含 @devnpc 提及,正常返回
@@ -246,6 +250,7 @@ mod tests {
             WebhookState {
                 secret: Arc::new(secret.to_string()),
                 sender,
+                mention_regex: Arc::new(r"@devnpc\s*(.*)".to_string()),
             },
             receiver,
         )
@@ -364,10 +369,11 @@ mod tests {
     fn webhook_config_default() {
         let config = WebhookConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.port, 0);
-        assert!(config.host.is_empty());
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.host, "0.0.0.0");
         assert!(config.secret.is_empty());
-        assert!(config.path.is_empty());
+        assert_eq!(config.path, "/webhook");
+        assert_eq!(config.channel_buffer_size, 32);
     }
 
     #[test]

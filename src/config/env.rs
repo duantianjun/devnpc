@@ -76,6 +76,17 @@ pub fn get_u8(var: &str) -> Result<Option<u8>> {
     }
 }
 
+/// 读取并解析为 f64,缺失返回 None,解析失败返回错误
+pub fn get_f64(var: &str) -> Result<Option<f64>> {
+    match std::env::var(var) {
+        Ok(s) => s
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| DevnpcError::Config(format!("环境变量 {var} 不是有效 f64: {s}"))),
+        Err(_) => Ok(None),
+    }
+}
+
 /// 读取并解析 SopMode,缺失返回 None,非法值返回错误
 pub fn get_sop_mode(var: &str) -> Result<Option<SopMode>> {
     match std::env::var(var) {

@@ -42,10 +42,10 @@ pub fn create_all_tools(
         Arc::new(create_git_diff_tool(workspace.clone())),
         Arc::new(create_git_commit_tool(git_ops)),
         // AFT 代码感知工具
-        Arc::new(create_aft_outline_tool(file_io.clone())),
-        Arc::new(create_aft_view_symbol_tool(file_io.clone())),
-        Arc::new(create_aft_edit_symbol_tool(file_io.clone())),
-        Arc::new(create_aft_search_symbols_tool(file_io.clone())),
+        Arc::new(create_aft_outline_tool(file_io.clone(), &config.tools)),
+        Arc::new(create_aft_view_symbol_tool(file_io.clone(), &config.tools)),
+        Arc::new(create_aft_edit_symbol_tool(file_io.clone(), &config.tools)),
+        Arc::new(create_aft_search_symbols_tool(file_io.clone(), &config.tools)),
         Arc::new(create_aft_ast_replace_tool(file_io)),
     ];
 
@@ -540,8 +540,8 @@ fn node_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 /// 递归收集节点中所有感兴趣的符号
-fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize, lang: Language) -> Vec<SymbolInfo> {
-    if depth > 20 {
+fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize, max_depth: usize, lang: Language) -> Vec<SymbolInfo> {
+    if depth > max_depth {
         return Vec::new();
     }
     let mut symbols = Vec::new();
@@ -558,7 +558,7 @@ fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize, lan
         });
     }
     for child in node.children(&mut node.walk()) {
-        symbols.extend(collect_symbols(child, source, depth + 1, lang));
+        symbols.extend(collect_symbols(child, source, depth + 1, max_depth, lang));
     }
     symbols
 }
@@ -581,9 +581,10 @@ fn find_symbol_node<'a>(
     source: &'a [u8],
     name: &str,
     depth: usize,
+    max_depth: usize,
     lang: Language,
 ) -> Option<tree_sitter::Node<'a>> {
-    if depth > 20 {
+    if depth > max_depth {
         return None;
     }
     let kinds = interesting_kinds(lang);
@@ -592,7 +593,7 @@ fn find_symbol_node<'a>(
         return Some(node);
     }
     for child in node.children(&mut node.walk()) {
-        if let Some(found) = find_symbol_node(child, source, name, depth + 1, lang) {
+        if let Some(found) = find_symbol_node(child, source, name, depth + 1, max_depth, lang) {
             return Some(found);
         }
     }
@@ -600,8 +601,8 @@ fn find_symbol_node<'a>(
 }
 
 /// 递归收集源码文件 (与 detect_language 支持的 13 种语言一致)
-fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 10 {
+fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize, max_depth: usize, ignore_dirs: &[String]) {
+    if depth > max_depth {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -611,10 +612,10 @@ fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize)
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == "target" || name == ".git" || name == "node_modules" {
+            if ignore_dirs.iter().any(|d| *d == name) {
                 continue;
             }
-            collect_source_files(&path, results, depth + 1);
+            collect_source_files(&path, results, depth + 1, max_depth, ignore_dirs);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
             && matches!(
                 ext,
@@ -647,18 +648,20 @@ fn parse_file(
 }
 
 /// aft_outline: 列出文件的所有顶层符号 (多语言)
-fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
+fn create_aft_outline_tool(file_io: FileIo, tools_config: &crate::config::ToolsConfig) -> FunctionTool {
+    let max_symbol_depth = tools_config.max_symbol_depth;
     FunctionTool::new(
         "aft_outline",
         "列出源码文件的所有顶层符号,返回符号名+行号范围。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
+            let max_symbol_depth = max_symbol_depth;
             Box::pin(async move {
                 let path = args["path"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 path 参数")
                 })?;
                 let (tree, lang, source) = parse_file(&file_io, path)?;
-                let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, lang);
+                let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, max_symbol_depth, lang);
                 if symbols.is_empty() {
                     return Ok(serde_json::json!({ "output": "(无顶层符号)" }));
                 }
@@ -676,12 +679,14 @@ fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
 }
 
 /// aft_view_symbol: 查看文件中指定符号的完整定义源码
-fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
+fn create_aft_view_symbol_tool(file_io: FileIo, tools_config: &crate::config::ToolsConfig) -> FunctionTool {
+    let max_symbol_depth = tools_config.max_symbol_depth;
     FunctionTool::new(
         "aft_view_symbol",
         "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
+            let max_symbol_depth = max_symbol_depth;
             Box::pin(async move {
                 let path = args["path"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 path 参数")
@@ -690,7 +695,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 symbol 参数")
                 })?;
                 let (tree, lang, source) = parse_file(&file_io, path)?;
-                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, lang)
+                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, max_symbol_depth, lang)
                     .ok_or_else(|| {
                         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
                     })?;
@@ -704,12 +709,14 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
 }
 
 /// aft_edit_symbol: 替换文件中指定符号的完整定义
-fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
+fn create_aft_edit_symbol_tool(file_io: FileIo, tools_config: &crate::config::ToolsConfig) -> FunctionTool {
+    let max_symbol_depth = tools_config.max_symbol_depth;
     FunctionTool::new(
         "aft_edit_symbol",
         "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
+            let max_symbol_depth = max_symbol_depth;
             Box::pin(async move {
                 let path = args["path"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 path 参数")
@@ -721,7 +728,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 content 参数")
                 })?;
                 let (tree, lang, source) = parse_file(&file_io, path)?;
-                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, lang)
+                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, max_symbol_depth, lang)
                     .ok_or_else(|| {
                         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
                     })?;
@@ -755,12 +762,18 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
 }
 
 /// aft_search_symbols: 在 workspace 中搜索符号名匹配正则的符号
-fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
+fn create_aft_search_symbols_tool(file_io: FileIo, tools_config: &crate::config::ToolsConfig) -> FunctionTool {
+    let max_symbol_depth = tools_config.max_symbol_depth;
+    let max_file_depth = tools_config.max_file_depth;
+    let ignore_dirs = tools_config.ignore_dirs.clone();
     FunctionTool::new(
         "aft_search_symbols",
         "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。搜索 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
+            let max_symbol_depth = max_symbol_depth;
+            let max_file_depth = max_file_depth;
+            let ignore_dirs = ignore_dirs.clone();
             Box::pin(async move {
                 let pattern_str = args["pattern"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 pattern 参数")
@@ -779,7 +792,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
                 };
 
                 let mut results = Vec::new();
-                collect_source_files(&search_dir, &mut results, 0);
+                collect_source_files(&search_dir, &mut results, 0, max_file_depth, &ignore_dirs);
 
                 let mut matches = Vec::new();
                 for file_path in &results {
@@ -794,7 +807,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
                         Err(_) => continue,
                     };
                     let tree = parse_source(&source, lang)?;
-                    let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, lang);
+                    let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, max_symbol_depth, lang);
                     for sym in &symbols {
                         if regex.is_match(&sym.name) {
                             matches.push(format!(
@@ -875,7 +888,7 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CommandConfig, ReadFileConfig};
+    use crate::config::{CommandConfig, ReadFileConfig, ToolsConfig};
     use adk_rust::Tool;
     use std::fs;
     use std::sync::Arc;
@@ -1009,8 +1022,9 @@ mod tests {
         fs::create_dir_all(dir.path().join("node_modules")).unwrap();
         fs::write(dir.path().join("node_modules/lib.js"), "// skip").unwrap();
 
+        let tools_config = ToolsConfig::default();
         let mut results = Vec::new();
-        collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
+        collect_source_files(&dir.path().to_path_buf(), &mut results, 0, tools_config.max_file_depth, &tools_config.ignore_dirs);
         // 仅应收集到 main.rs
         assert_eq!(results.len(), 1, "应仅收集 1 个文件,实际: {:?}", results);
         assert!(results[0].ends_with("main.rs"));
@@ -1027,8 +1041,9 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("deep.rs"), "fn deep() {}").unwrap();
 
+        let tools_config = ToolsConfig::default();
         let mut results = Vec::new();
-        collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
+        collect_source_files(&dir.path().to_path_buf(), &mut results, 0, tools_config.max_file_depth, &tools_config.ignore_dirs);
         assert!(results.is_empty(), "深度 > 10 的文件不应被收集,实际: {:?}", results);
     }
 
@@ -1047,8 +1062,9 @@ mod tests {
         fs::write(dir.path().join("h.txt"), "not source").unwrap();
         fs::write(dir.path().join("i.md"), "# doc").unwrap();
 
+        let tools_config = ToolsConfig::default();
         let mut results = Vec::new();
-        collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
+        collect_source_files(&dir.path().to_path_buf(), &mut results, 0, tools_config.max_file_depth, &tools_config.ignore_dirs);
         let exts: Vec<String> = results
             .iter()
             .filter_map(|p| p.extension().and_then(|e| e.to_str()).map(String::from))
@@ -1067,7 +1083,7 @@ mod tests {
     fn collect_symbols_extracts_rust_functions() {
         let src = "fn foo() {}\nfn bar() -> i32 { 42 }\nfn main() {}\n";
         let tree = parse_source(src, Language::Rust).unwrap();
-        let symbols = collect_symbols(tree.root_node(), src.as_bytes(), 0, Language::Rust);
+        let symbols = collect_symbols(tree.root_node(), src.as_bytes(), 0, 20, Language::Rust);
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"foo"), "应包含 foo,实际: {:?}", names);
         assert!(names.contains(&"bar"), "应包含 bar,实际: {:?}", names);
@@ -1079,7 +1095,7 @@ mod tests {
         // 构造一个深度嵌套的结构 (不会在正常 Rust 中发生,但验证保护逻辑)
         let src = "fn main() {}";
         let tree = parse_source(src, Language::Rust).unwrap();
-        let symbols = collect_symbols(tree.root_node(), src.as_bytes(), 25, Language::Rust);
+        let symbols = collect_symbols(tree.root_node(), src.as_bytes(), 25, 20, Language::Rust);
         assert!(symbols.is_empty(), "超过深度限制应返回空");
     }
 
@@ -1087,7 +1103,7 @@ mod tests {
     fn find_symbol_node_locates_existing_symbol() {
         let src = "fn foo() {}\nfn bar() {}\n";
         let tree = parse_source(src, Language::Rust).unwrap();
-        let node = find_symbol_node(tree.root_node(), src.as_bytes(), "foo", 0, Language::Rust);
+        let node = find_symbol_node(tree.root_node(), src.as_bytes(), "foo", 0, 20, Language::Rust);
         assert!(node.is_some(), "应找到 foo");
     }
 
@@ -1095,7 +1111,7 @@ mod tests {
     fn find_symbol_node_returns_none_for_missing() {
         let src = "fn foo() {}\n";
         let tree = parse_source(src, Language::Rust).unwrap();
-        let node = find_symbol_node(tree.root_node(), src.as_bytes(), "nonexistent", 0, Language::Rust);
+        let node = find_symbol_node(tree.root_node(), src.as_bytes(), "nonexistent", 0, 20, Language::Rust);
         assert!(node.is_none(), "不存在的符号应返回 None");
     }
 
@@ -1388,7 +1404,7 @@ mod tests {
     async fn aft_outline_lists_rust_symbols() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_outline_tool(file_io);
+        let tool = create_aft_outline_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"path": "main.rs"}))
@@ -1404,7 +1420,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("empty.rs"), "// just a comment\n").unwrap();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_outline_tool(file_io);
+        let tool = create_aft_outline_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"path": "empty.rs"}))
@@ -1417,7 +1433,7 @@ mod tests {
     async fn aft_outline_rejects_unsupported_extension() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_outline_tool(file_io);
+        let tool = create_aft_outline_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool.execute(ctx, serde_json::json!({"path": "README.md"})).await;
         assert!(result.is_err(), "不支持的文件类型应返回 Err");
@@ -1431,7 +1447,7 @@ mod tests {
     async fn aft_view_symbol_returns_definition() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_view_symbol_tool(file_io);
+        let tool = create_aft_view_symbol_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"path": "main.rs", "symbol": "add"}))
@@ -1445,7 +1461,7 @@ mod tests {
     async fn aft_view_symbol_missing_symbol_returns_error() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_view_symbol_tool(file_io);
+        let tool = create_aft_view_symbol_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"path": "main.rs", "symbol": "nonexistent"}))
@@ -1461,7 +1477,7 @@ mod tests {
     async fn aft_edit_symbol_replaces_definition() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_edit_symbol_tool(file_io);
+        let tool = create_aft_edit_symbol_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let new_def = "fn add(a: i32, b: i32) -> i32 {\n    a * b\n}";
         let result = tool
@@ -1481,7 +1497,7 @@ mod tests {
     async fn aft_edit_symbol_cancels_on_syntax_error() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_edit_symbol_tool(file_io);
+        let tool = create_aft_edit_symbol_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         // 故意写语法错误的代码
         let broken = "fn add(a: i32, b: i32) -> i32 { a +"; // 不完整
@@ -1507,7 +1523,7 @@ mod tests {
     async fn aft_search_symbols_finds_matches() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_search_symbols_tool(file_io);
+        let tool = create_aft_search_symbols_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"pattern": "add"}))
@@ -1521,7 +1537,7 @@ mod tests {
     async fn aft_search_symbols_no_match_returns_hint() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_search_symbols_tool(file_io);
+        let tool = create_aft_search_symbols_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"pattern": "nonexistent_symbol_xyz"}))
@@ -1534,7 +1550,7 @@ mod tests {
     async fn aft_search_symbols_invalid_regex_returns_error() {
         let dir = setup_workspace();
         let file_io = FileIo::new(dir.path());
-        let tool = create_aft_search_symbols_tool(file_io);
+        let tool = create_aft_search_symbols_tool(file_io, &ToolsConfig::default());
         let ctx = make_ctx();
         let result = tool
             .execute(ctx, serde_json::json!({"pattern": "[invalid"}))
