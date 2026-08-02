@@ -63,6 +63,82 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 | [src/trigger/](src/trigger/) | `@devnpc` 提及解析 |
 | [src/report/](src/report/) | 轨迹采集 + HTML 报告 + 发布 |
 
+## 功能一览
+
+### 核心能力
+
+| 能力 | 说明 |
+|------|------|
+| **AI 自动编码** | 理解项目上下文,自动修改代码、修复 bug、实现功能 |
+| **CI 闭环** | 自动创建 Draft MR → 轮询 Pipeline → 失败时解析日志 → 修复重试 |
+| **多触发方式** | MR/Issue 评论 `@devnpc` 触发,或命令行手动触发 |
+| **多模型路由** | 支持 DeepSeek/OpenAI/Anthropic/Gemini,简单/复杂任务可用不同模型 |
+| **9 种语言支持** | Rust、Java、Python、JavaScript、TypeScript、Go、C、C++ 的 AST 级代码感知 |
+
+### 工具列表
+
+| 工具 | 功能 |
+|------|------|
+| `read_file` | 读取文件内容(限前 N 行防 token 溢出) |
+| `write_file` | 写入文件(全量覆盖,自动创建目录) |
+| `list_files` | 列出目录内容 |
+| `run_command` | 执行白名单命令(`cargo/rustc/make/just/fmt/clippy/echo`),黑名单拦截(`rm/mv/cp/curl/wget/ssh/scp`),可配置超时 |
+| `git_diff` | 查看工作区相对 HEAD 的未提交改动 |
+| `git_commit` | 提交所有改动 |
+| `create_mr_note` | 在 MR 上评论执行结果 |
+| `aft_outline` | 列出文件所有顶层符号(函数、结构体、类等) |
+| `aft_view_symbol` | 查看指定符号的完整定义源码 |
+| `aft_edit_symbol` | 替换指定符号的完整定义(替换后语法验证) |
+| `aft_search_symbols` | 在工作区按正则搜索符号名 |
+| `aft_ast_replace` | 在文件中按正则查找替换,替换后验证语法 |
+
+### GitLab API 能力
+
+| API | 功能 |
+|-----|------|
+| 获取 Issue/MR 详情 | 读取 Issue 和 MR 的标题、描述、状态 |
+| 创建/更新 MR | 创建 Draft MR,移除 Draft 状态 |
+| 获取 Pipeline 与 Job | 查询 Pipeline 状态、Job 列表、Job 原始日志 |
+| 评论管理 | 读取 Issue/MR 评论,发表评论 |
+| 关联查询 | 获取 Issue 关联的 MR、最近 Pipeline |
+
+### 智能上下文(研发记忆)
+
+Agent 执行前自动聚合以下信息,降低 LLM 上下文成本:
+
+| 信息 | 来源 |
+|------|------|
+| 仓库目录树 | `git ls-tree` |
+| 关键文件摘要 | Cargo.toml、README.md、main.rs 等 |
+| Issue 详情 | GitLab API |
+| 关联 MR | GitLab API |
+| 评论历史 | GitLab API |
+| 最近提交记录 | `git log` |
+| CI 失败历史 | 最近 Pipeline 失败记录 |
+| 项目规范 | `.devnpc.md` 配置 |
+
+### 配置系统
+
+三层来源合并(优先级: 环境变量 > `.devnpc.md` > 内置默认值):
+
+- **LLM 提供商**: provider/model/api_key/base_url
+- **GitLab 连接**: url/token/project_id
+- **命令安全**: 白名单/黑名单/超时
+- **CI 闭环**: 轮询间隔/超时/最大重试
+- **SOP 约束**: soft(偏离警告) / strict(偏离即阻断)
+- **模型路由**: 简单/复杂任务使用不同模型
+- **报告发布**: Artifact / Pages / 不发布
+
+### 报告系统
+
+执行完成后自动生成 HTML 报告,包含:
+
+- 执行状态与耗时
+- Token 消耗与成本估算
+- LLM 调用次数与工具调用轨迹
+- CI 重试次数
+- 完整的执行事件流
+
 ## GitLab 集成
 
 ### 1. 部署
