@@ -142,3 +142,129 @@ fn create_gemini(_config: &LlmConfig) -> Result<Arc<dyn Llm>, DevnpcError> {
         "Gemini 支持未编译 (需启用 gemini feature)".to_string(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        CiConfig, CommandConfig, ContextConfig, GitlabConfig, LlmConfig, Limits, LogParserConfig,
+        McpConfig, MemoryConfig, ModelRoutingConfig, ProjectConfig, ReadFileConfig, ReportConfig,
+        SummaryConfig,
+    };
+
+    /// 构造测试用 Config (DeepSeek provider, 假 API key)
+    fn make_test_config(simple: &str, complex: &str) -> crate::config::Config {
+        crate::config::Config {
+            llm: LlmConfig {
+                api_key: "test-key".into(),
+                base_url: "".into(),
+                model: "deepseek-chat".into(),
+                provider: "deepseek".into(),
+            },
+            gitlab: GitlabConfig {
+                url: "".into(),
+                token: "".into(),
+                project_id: 1,
+            },
+            limits: Limits::default(),
+            project: ProjectConfig::default(),
+            model_routing: ModelRoutingConfig {
+                simple_model: simple.into(),
+                complex_model: complex.into(),
+            },
+            report: ReportConfig::default(),
+            command: CommandConfig::default(),
+            read_file: ReadFileConfig::default(),
+            log_parser: LogParserConfig::default(),
+            summary: SummaryConfig::default(),
+            context: ContextConfig::default(),
+            ci: CiConfig::default(),
+            mcp: McpConfig::default(),
+            memory: MemoryConfig::default(),
+            npc_config: crate::config::NpcConfigSection::default(),
+        }
+    }
+
+    #[test]
+    fn test_create_model_unsupported_provider_returns_error() {
+        let cfg = LlmConfig {
+            api_key: "k".into(),
+            base_url: "".into(),
+            model: "m".into(),
+            provider: "unsupported_provider".into(),
+        };
+        let result = create_model(&cfg);
+        match result {
+            Err(DevnpcError::Config(msg)) => assert!(msg.contains("不支持的模型提供商")),
+            Err(_) => panic!("expected Config error"),
+            Ok(_) => panic!("expected error for unsupported provider"),
+        }
+    }
+
+    #[test]
+    fn test_create_model_deepseek_ok() {
+        let cfg = LlmConfig {
+            api_key: "test-key".into(),
+            base_url: "".into(),
+            model: "deepseek-chat".into(),
+            provider: "deepseek".into(),
+        };
+        let result = create_model(&cfg);
+        assert!(result.is_ok(), "DeepSeek 构建应成功: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_create_model_openai_ok() {
+        let cfg = LlmConfig {
+            api_key: "test-key".into(),
+            base_url: "".into(),
+            model: "gpt-4".into(),
+            provider: "openai".into(),
+        };
+        let result = create_model(&cfg);
+        assert!(result.is_ok(), "OpenAI 构建应成功: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_create_simple_model_fallback_when_empty() {
+        // simple_model 为空时,应回退到主模型 (deepseek-chat)
+        let config = make_test_config("", "");
+        let result = create_simple_model(&config);
+        assert!(result.is_ok(), "回退到主模型应成功: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_create_complex_model_fallback_when_empty() {
+        // complex_model 为空时,应回退到主模型 (deepseek-chat)
+        let config = make_test_config("", "");
+        let result = create_complex_model(&config);
+        assert!(result.is_ok(), "回退到主模型应成功: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_create_simple_model_uses_configured_name() {
+        // simple_model 配置了 "deepseek-coder",应使用该模型名构造客户端
+        let config = make_test_config("deepseek-coder", "");
+        let result = create_simple_model(&config);
+        assert!(result.is_ok(), "simple_model 应构造成功: {:?}", result.err());
+        // 模型名不影响 Arc<dyn Llm> 实例的可观察行为,只能验证 Ok
+    }
+
+    #[test]
+    fn test_create_complex_model_uses_configured_name() {
+        // complex_model 配置了 "deepseek-reasoner",应使用该模型名构造客户端
+        let config = make_test_config("", "deepseek-reasoner");
+        let result = create_complex_model(&config);
+        assert!(result.is_ok(), "complex_model 应构造成功: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_create_simple_model_unsupported_provider_in_routing() {
+        // simple_model 配置了不支持的 provider 不会触发,因为 routing 只换 model 名,
+        // provider 仍来自主 LlmConfig
+        let config = make_test_config("gpt-4-mini", "");
+        // provider 还是 deepseek,只是 model 名变成 gpt-4-mini,DeepSeek 客户端会接受任意 model 名
+        let result = create_simple_model(&config);
+        assert!(result.is_ok(), "应使用 deepseek provider 构造成功: {:?}", result.err());
+    }
+}

@@ -1,3 +1,14 @@
+# devnpc GitLab CI 集成示例
+#
+# 使用前:
+# 1. 构建并推送 devnpc 镜像到 Container Registry:
+#    docker build -t $CI_REGISTRY_IMAGE/devnpc:latest .
+#    docker push $CI_REGISTRY_IMAGE/devnpc:latest
+# 2. 在 CI/CD Settings > CI/Variables 中配置:
+#    - DEVNPC_API_KEY (LLM API Key, masked)
+#    - GITLAB_TOKEN (有 api 范围的 Project/Group Access Token, masked)
+# 3. 在项目根目录添加 .devnpc.md (可选,定义 SOP 约束)
+
 stages:
   - test
   - npc
@@ -9,7 +20,7 @@ test:
 
 devnpc:
   stage: npc
-  image: registry.example.com/devnpc:latest
+  image: ${CI_REGISTRY_IMAGE}/devnpc:latest
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       when: on_stop
@@ -19,7 +30,7 @@ devnpc:
     DEVNPC_API_KEY: $DEVNPC_API_KEY
     DEVNPC_BASE_URL: "https://api.deepseek.com/v1"
     DEVNPC_MODEL: "deepseek-chat"
-    GITLAB_TOKEN: $DEVNPC_GITLAB_TOKEN
+    GITLAB_TOKEN: $GITLAB_TOKEN
   script:
     - devnpc run
   artifacts:

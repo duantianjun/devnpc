@@ -1,4 +1,4 @@
-//! Git 命令封装 (P2 完整实现)
+//! Git 命令封装
 //!
 //! 通过 std::process::Command 调用系统 git,避免 libgit2 C 依赖。
 //! 同步执行: CI 单任务环境,git 命令通常较快;clone/push 较慢但可接受。

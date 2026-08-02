@@ -1,15 +1,15 @@
-//! CI 日志解析器 (P4 完整实现)
+//! CI 日志解析器
 //!
 //! 识别常见 CI 失败模式:
 //! - 编译错误: error[E####]: / error: / FAILURE:
 //! - 测试失败: panicked at / FAILED / Tests failed
 //! - 超时: timed out / killed
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::LogParserConfig;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureType {
     Compile,

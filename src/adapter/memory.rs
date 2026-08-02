@@ -58,9 +58,10 @@ impl MemoryStore {
             crate::error::DevnpcError::Sqlite(format!("锁获取失败: {e}"))
         })?;
         if guard.is_none() {
-            *guard = Some(Connection::open(&self.db_path).map_err(|e| {
+            let conn = Connection::open(&self.db_path).map_err(|e| {
                 crate::error::DevnpcError::Sqlite(format!("连接数据库失败: {e}"))
-            })?);
+            })?;
+            *guard = Some(conn);
         }
         Ok(guard)
     }
@@ -72,7 +73,9 @@ impl MemoryStore {
         }
         tracing::info!(db_path = %self.db_path.display(), "初始化记忆存储");
         let guard = self.connect()?;
-        let conn = guard.as_ref().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| {
+            crate::error::DevnpcError::Sqlite("数据库连接初始化失败".into())
+        })?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS task_records (
@@ -115,7 +118,9 @@ impl MemoryStore {
             return Ok(());
         }
         let guard = self.connect()?;
-        let conn = guard.as_ref().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| {
+            crate::error::DevnpcError::Sqlite("数据库连接初始化失败".into())
+        })?;
 
         let files_json = serde_json::to_string(&record.modified_files)
             .unwrap_or_default();
@@ -149,7 +154,9 @@ impl MemoryStore {
             return Ok(());
         }
         let guard = self.connect()?;
-        let conn = guard.as_ref().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| {
+            crate::error::DevnpcError::Sqlite("数据库连接初始化失败".into())
+        })?;
 
         conn.execute(
             "INSERT INTO fix_experiences
@@ -181,7 +188,9 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
         let guard = self.connect()?;
-        let conn = guard.as_ref().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| {
+            crate::error::DevnpcError::Sqlite("数据库连接初始化失败".into())
+        })?;
 
         // 提取关键词 (取前 5 个非空词)
         let keywords: Vec<&str> = task_description

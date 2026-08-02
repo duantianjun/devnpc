@@ -7,7 +7,9 @@ use reqwest::StatusCode;
 
 use crate::error::{DevnpcError, Result};
 
-use super::{CreateMrReq, GitlabApi, Issue, Job, MergeRequest, Note, Pipeline};
+use super::{
+    CreateMrReq, GitlabApi, Issue, Job, MergeRequest, Note, Pipeline, RepoTreeEntry,
+};
 
 /// reqwest 实现
 pub struct GitlabClient {
@@ -190,6 +192,53 @@ impl GitlabClient {
             self.base_url, project_id, job_id
         )
     }
+
+    fn pipeline_url(&self, project_id: u64, pipeline_id: u64) -> String {
+        format!(
+            "{}/api/v4/projects/{}/pipelines/{}",
+            self.base_url, project_id, pipeline_id
+        )
+    }
+
+    /// 仓库文件 URL: file_path 整体编码 (含 `/` → `%2F`),ref_ 做 URL 编码,使用 `?raw=1` 取原始内容
+    fn file_url(&self, project_id: u64, file_path: &str, ref_: &str) -> String {
+        format!(
+            "{}/api/v4/projects/{}/repository/files/{}?ref={}&raw=1",
+            self.base_url, project_id, encode_uri_component(file_path), encode_uri_component(ref_)
+        )
+    }
+
+    /// 仓库目录树 URL: path 留空时表示根目录,path 和 ref_ 做 URL 编码
+    fn tree_url(&self, project_id: u64, path: &str, ref_: &str) -> String {
+        let ref_encoded = encode_uri_component(ref_);
+        if path.is_empty() {
+            format!(
+                "{}/api/v4/projects/{}/repository/tree?ref={}",
+                self.base_url, project_id, ref_encoded
+            )
+        } else {
+            format!(
+                "{}/api/v4/projects/{}/repository/tree?path={}&ref={}",
+                self.base_url, project_id, encode_uri_component(path), ref_encoded
+            )
+        }
+    }
+}
+
+/// URL 查询参数编码 (RFC 3986 percent-encoding)
+///
+/// 编码所有非保留字符 (A-Z a-z 0-9 - _ . ~ 之外的字符全部编码为 %XX)。
+/// 用于 GitLab API 的 file_path / ref_ / path 参数,防止 `&` `#` `?` 等字符注入额外查询参数。
+fn encode_uri_component(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                char::from(b).to_string()
+            } else {
+                format!("%{:02X}", b)
+            }
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -285,6 +334,26 @@ impl GitlabApi for GitlabClient {
     async fn get_job_log(&self, project_id: u64, job_id: u64) -> Result<String> {
         let url = self.job_log_url(project_id, job_id);
         self.get_raw(&url).await
+    }
+
+    async fn get_pipeline(&self, project_id: u64, pipeline_id: u64) -> Result<Pipeline> {
+        let url = self.pipeline_url(project_id, pipeline_id);
+        self.get(&url).await
+    }
+
+    async fn get_file(&self, project_id: u64, file_path: &str, ref_: &str) -> Result<String> {
+        let url = self.file_url(project_id, file_path, ref_);
+        self.get_raw(&url).await
+    }
+
+    async fn list_tree(
+        &self,
+        project_id: u64,
+        path: &str,
+        ref_: &str,
+    ) -> Result<Vec<RepoTreeEntry>> {
+        let url = self.tree_url(project_id, path, ref_);
+        self.get(&url).await
     }
 }
 
@@ -575,5 +644,140 @@ mod tests {
         assert_eq!(pipelines.len(), 1);
         assert_eq!(pipelines[0].id, 101);
         assert_eq!(pipelines[0].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn get_pipeline_returns_single_pipeline() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/pipelines/100"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 100,
+                "status": "running",
+                "ref": "main",
+                "sha": "abc123",
+                "web_url": "https://gl.test/p/100"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let p = client.get_pipeline(1, 100).await.unwrap();
+        assert_eq!(p.id, 100);
+        assert_eq!(p.status, "running");
+        assert_eq!(p.ref_.as_deref(), Some("main"));
+    }
+
+    #[tokio::test]
+    async fn get_pipeline_returns_not_found_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/pipelines/999"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_pipeline(1, 999).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::DevnpcError::GitlabNotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_file_returns_raw_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/repository/files/src%2Fmain.rs"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .and(wiremock::matchers::query_param("ref", "main"))
+            .and(wiremock::matchers::query_param("raw", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("fn main() {}\n"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let content = client.get_file(1, "src/main.rs", "main").await.unwrap();
+        assert_eq!(content, "fn main() {}\n");
+    }
+
+    #[tokio::test]
+    async fn get_file_returns_not_found_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/repository/files/missing.rs"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_file(1, "missing.rs", "main").await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::DevnpcError::GitlabNotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_tree_returns_entries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/repository/tree"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .and(wiremock::matchers::query_param("ref", "main"))
+            .and(wiremock::matchers::query_param("path", "src"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "abc1",
+                    "name": "main.rs",
+                    "type": "blob",
+                    "path": "src/main.rs",
+                    "mode": "100644"
+                },
+                {
+                    "id": "abc2",
+                    "name": "lib",
+                    "type": "tree",
+                    "path": "src/lib",
+                    "mode": "040000"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let entries = client.list_tree(1, "src", "main").await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "main.rs");
+        assert_eq!(entries[0].type_, "blob");
+        assert_eq!(entries[1].type_, "tree");
+        assert_eq!(entries[1].path, "src/lib");
+    }
+
+    #[tokio::test]
+    async fn list_tree_root_uses_empty_path() {
+        let server = MockServer::start().await;
+        // 根目录: 无 path 参数
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/repository/tree"))
+            .and(wiremock::matchers::query_param("ref", "main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "r1",
+                    "name": "README.md",
+                    "type": "blob",
+                    "path": "README.md",
+                    "mode": "100644"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let entries = client.list_tree(1, "", "main").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "README.md");
     }
 }

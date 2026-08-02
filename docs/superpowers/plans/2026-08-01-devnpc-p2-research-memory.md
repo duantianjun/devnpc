@@ -1,6 +1,6 @@
 # devnpc P2 研发记忆 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 实现研发记忆聚合器,并行拉取 Git 仓库结构 + GitLab Issue/PR/Notes/CI 历史,聚合成 `Context` 供 Agent 首轮决策使用。
 
@@ -28,7 +28,7 @@
 
 **目标:** 实现 `GitOps` 全部方法,用 `std::process::Command` 调系统 git。同步执行(CI 单任务,避免 spawn_blocking 复杂度)。
 
-- [ ] **Step 1: 写 run_git_cmd 辅助函数测试(命令失败映射 GitCommand 错误)**
+- [x] **Step 1: 写 run_git_cmd 辅助函数测试(命令失败映射 GitCommand 错误)**
 
 在 `src/git/ops.rs` 的 `#[cfg(test)] mod tests` 中追加:
 
@@ -46,12 +46,12 @@
     }
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 Run: `cargo test --lib git::ops::tests::run_git_cmd_returns_git_command_error_on_non_zero_exit`
 Expected: FAIL with "method not found `run_git_cmd`" 或编译错误
 
-- [ ] **Step 3: 实现 run_git_cmd + 改造 GitOps**
+- [x] **Step 3: 实现 run_git_cmd + 改造 GitOps**
 
 替换 `src/git/ops.rs` 全部内容为:
 
@@ -187,12 +187,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 Run: `cargo test --lib git::ops::tests`
 Expected: PASS (1 test)
 
-- [ ] **Step 5: 写 recent_commits / ls_tree 集成测试(用临时 git 仓库)**
+- [x] **Step 5: 写 recent_commits / ls_tree 集成测试(用临时 git 仓库)**
 
 在 `src/git/ops.rs` 的 `tests` mod 追加:
 
@@ -291,12 +291,12 @@ Expected: PASS (1 test)
     }
 ```
 
-- [ ] **Step 6: 运行测试验证通过**
+- [x] **Step 6: 运行测试验证通过**
 
 Run: `cargo test --lib git::ops::tests`
 Expected: PASS (5 tests)。若环境无 git,测试会失败 — 确认 git 在 PATH 中 (`git --version`)。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/git/ops.rs
@@ -313,7 +313,7 @@ git commit -m "feat: GitOps 实现 (clone/checkout/commit/push/recent_commits/ls
 
 **目标:** trait 新增 `get_related_mrs`(Issue 的关联 MR)和 `get_recent_pipelines`(限量,避免拉全量)。GitLab API: `GET /projects/:id/issues/:iid/related_merge_requests`。
 
-- [ ] **Step 1: 写 get_related_mrs 的 wiremock 测试**
+- [x] **Step 1: 写 get_related_mrs 的 wiremock 测试**
 
 在 `src/gitlab_api/client.rs` 的 `tests` mod 追加:
 
@@ -366,12 +366,12 @@ git commit -m "feat: GitOps 实现 (clone/checkout/commit/push/recent_commits/ls
     }
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 Run: `cargo test --lib gitlab_api::client::tests::get_related_mrs_returns_list`
 Expected: FAIL (trait 方法未定义,编译错误)
 
-- [ ] **Step 3: 扩展 trait + client 实现**
+- [x] **Step 3: 扩展 trait + client 实现**
 
 在 `src/gitlab_api/mod.rs` 的 `GitlabApi` trait 中,于 `create_mr_note` 之后追加两个方法:
 
@@ -413,12 +413,12 @@ Expected: FAIL (trait 方法未定义,编译错误)
     }
 ```
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 Run: `cargo test --lib gitlab_api::client::tests`
 Expected: PASS (12 tests: 原 10 + 新 2)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/gitlab_api/mod.rs src/gitlab_api/client.rs
@@ -434,7 +434,7 @@ git commit -m "feat: GitlabApi 扩展 get_related_mrs + get_recent_pipelines"
 
 **目标:** 用 `git ls-tree HEAD` 解析顶层 + 二级目录,构建 `RepoTree`。解析格式: `<mode> <type> <hash>\t<path>`。
 
-- [ ] **Step 1: 写 build_repo_tree 测试(用临时 git 仓库)**
+- [x] **Step 1: 写 build_repo_tree 测试(用临时 git 仓库)**
 
 在 `src/memory/repo_index.rs` 的 `tests` mod 追加:
 
@@ -498,12 +498,12 @@ mod tests {
     }
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 Run: `cargo test --lib memory::repo_index::tests`
 Expected: FAIL (build_repo_tree 仍为 unimplemented)
 
-- [ ] **Step 3: 实现 build_repo_tree**
+- [x] **Step 3: 实现 build_repo_tree**
 
 替换 `src/memory/repo_index.rs` 全部内容为:
 
@@ -581,12 +581,12 @@ pub fn select_key_files(tree: &RepoTree, workspace: &Path) -> Vec<KeyFile> {
 }
 ```
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 Run: `cargo test --lib memory::repo_index::tests`
 Expected: PASS (3 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/memory/repo_index.rs
@@ -602,7 +602,7 @@ git commit -m "feat: build_repo_tree 解析 git ls-tree (顶层+二级)"
 
 **目标:** 按 6 类规则匹配关键文件,生成摘要(Cargo.toml 取 [dependencies] 段;README.md 前 30 行;src/main.rs 前 50 行;其他源文件不读)。签名加 `workspace: &Path` 用于读文件。
 
-- [ ] **Step 1: 写 select_key_files 测试**
+- [x] **Step 1: 写 select_key_files 测试**
 
 在 `src/memory/repo_index.rs` 的 `tests` mod 追加:
 
@@ -662,12 +662,12 @@ git commit -m "feat: build_repo_tree 解析 git ls-tree (顶层+二级)"
     }
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 Run: `cargo test --lib memory::repo_index::tests`
 Expected: FAIL (select_key_files 返回空 Vec,断言失败)
 
-- [ ] **Step 3: 实现 select_key_files**
+- [x] **Step 3: 实现 select_key_files**
 
 替换 `src/memory/repo_index.rs` 中的 `select_key_files` 函数为:
 
@@ -758,12 +758,12 @@ fn take_first_n_lines(content: &str, n: usize) -> String {
 }
 ```
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 Run: `cargo test --lib memory::repo_index::tests`
 Expected: PASS (8 tests: 原 3 + 新 5)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/memory/repo_index.rs
@@ -779,7 +779,7 @@ git commit -m "feat: select_key_files 按 6 类规则匹配并生成摘要"
 
 **目标:** 实现 `extract_failures`(从 pipeline status=="failed" 提取 CiFailure,取最近 5 条)。调整 `Context::build` 签名加 `project_id`。P2 阶段无日志解析,failure_type 设 Other,root_cause 设 "pipeline failed"。
 
-- [ ] **Step 1: 写 extract_failures 测试**
+- [x] **Step 1: 写 extract_failures 测试**
 
 在 `src/memory/context.rs` 的 `tests` mod 追加:
 
@@ -839,12 +839,12 @@ mod tests {
     }
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 Run: `cargo test --lib memory::context::tests`
 Expected: FAIL (extract_failures 未定义)
 
-- [ ] **Step 3: 实现 extract_failures + 调整 build 签名**
+- [x] **Step 3: 实现 extract_failures + 调整 build 签名**
 
 在 `src/memory/context.rs` 中:
 1. 删除 `impl Context` 中的 `unimplemented!` build 方法,替换为完整实现 + extract_failures 函数:
@@ -928,17 +928,17 @@ impl Context {
 use crate::gitlab_api::{Issue, MergeRequest, Note, Pipeline};
 ```
 
-- [ ] **Step 4: 运行 extract_failures 测试验证通过**
+- [x] **Step 4: 运行 extract_failures 测试验证通过**
 
 Run: `cargo test --lib memory::context::tests::extract_failures`
 Expected: PASS (4 tests)
 
-- [ ] **Step 5: 确认整体编译通过(build 签名变更影响)**
+- [x] **Step 5: 确认整体编译通过(build 签名变更影响)**
 
 Run: `cargo build --lib`
 Expected: 编译成功。若有 `ProjectConfig::default()` 缺失,需确认 `ProjectConfig` 派生 `Default`(检查 `src/config/mod.rs`)。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/memory/context.rs
@@ -954,11 +954,11 @@ git commit -m "feat: extract_failures + Context::build 并行聚合 (P2)"
 
 **目标:** 用手写 `MockGitlab` 实现 `GitlabApi` trait,配合临时 git 仓库,验证 `Context::build` 端到端聚合。
 
-- [ ] **Step 1: 确认 ProjectConfig 派生 Default**
+- [x] **Step 1: 确认 ProjectConfig 派生 Default**
 
 Read `src/config/mod.rs`,确认 `ProjectConfig` 有 `#[derive(Default)]`。若无,在 Task 5 Step 5 已暴露编译错误,需补 `Default` 派生。
 
-- [ ] **Step 2: 写 Context::build 集成测试**
+- [x] **Step 2: 写 Context::build 集成测试**
 
 在 `src/memory/context.rs` 的 `tests` mod 追加:
 
@@ -1094,12 +1094,12 @@ Read `src/config/mod.rs`,确认 `ProjectConfig` 有 `#[derive(Default)]`。若�
     }
 ```
 
-- [ ] **Step 3: 运行测试验证通过**
+- [x] **Step 3: 运行测试验证通过**
 
 Run: `cargo test --lib memory::context::tests`
 Expected: PASS (5 tests: 4 extract_failures + 1 build 集成)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/memory/context.rs
@@ -1113,22 +1113,22 @@ git commit -m "test: Context::build 端到端聚合测试 (MockGitlab + 临时�
 **Files:**
 - 无修改(仅验证)
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 Run: `cargo test --all`
 Expected: 所有测试通过(原 44 + P2 新增约 18 = ~62)
 
-- [ ] **Step 2: clippy 严格检查**
+- [x] **Step 2: clippy 严格检查**
 
 Run: `cargo clippy --all-targets -- -D warnings`
 Expected: 无警告
 
-- [ ] **Step 3: release 构建**
+- [x] **Step 3: release 构建**
 
 Run: `cargo build --release`
 Expected: 成功
 
-- [ ] **Step 4: CLI 冒烟**
+- [x] **Step 4: CLI 冒烟**
 
 ```powershell
 $env:DEVNPC_API_KEY="sk-test1234567890abcdef"
@@ -1142,7 +1142,7 @@ $env:CI_PROJECT_ID="1"
 ```
 Expected: 两条命令均正常输出,退出码 0
 
-- [ ] **Step 5: Commit 收尾(若有未提交改动)**
+- [x] **Step 5: Commit 收尾(若有未提交改动)**
 
 ```bash
 git status

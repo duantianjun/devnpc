@@ -4,12 +4,14 @@ use clap::{Parser, Subcommand};
 
 use adk_rust::agent::LlmAgentBuilder;
 
+use devnpc::adapter::agents::{build_code_agent, build_fix_agent, build_pm_agent, build_review_agent};
 use devnpc::adapter::callbacks::DevnpcCallbacks;
 use devnpc::adapter::context::{build_initial_state, create_session_service};
-use devnpc::adapter::provider::{create_complex_model, create_model, create_simple_model};
+use devnpc::adapter::provider::{create_complex_model, create_simple_model};
 use devnpc::adapter::tools::create_all_tools;
 use devnpc::ci::controller::{CiController, CiOutcome, FixHandler};
 use devnpc::ci::log_parser::ParsedFailure;
+use devnpc::config::npc_config::NpcConfig;
 use devnpc::config::Config;
 use devnpc::error::Result;
 use devnpc::git::ops::GitOps;
@@ -150,7 +152,7 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
 
     let context = if let Some(iid) = issue_iid {
         tracing::info!(issue_iid = iid, "构建上下文");
-        Some(Context::build(&*gitlab, &git_ops, config.gitlab.project_id, iid, &config.summary, &config.context).await?)
+        Some(Context::build(&*gitlab, &git_ops, config.gitlab.project_id, iid, &config.summary, &config.context, &config.project).await?)
     } else {
         tracing::warn!("无 Issue IID,跳过上下文构建");
         None
@@ -159,8 +161,24 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     // 6. 创建 Orchestrator 并执行
     let start_time = chrono::Utc::now();
 
-    // 创建模型
-    let model = create_model(&config.llm)?;
+    // 创建模型路由 (simple/complex 两种)
+    let simple_model = create_simple_model(&config)?;
+    let complex_model = create_complex_model(&config)?;
+
+    // 按任务复杂度为主 Agent 选择模型 (模型路由真正落地)
+    let task_complexity = devnpc::adapter::orchestrator::classify_task_complexity(
+        &task_spec.description,
+    );
+    let model = match task_complexity {
+        devnpc::adapter::orchestrator::TaskComplexity::Simple => {
+            tracing::info!(?task_complexity, "主 Agent 使用 simple_model");
+            simple_model.clone()
+        }
+        devnpc::adapter::orchestrator::TaskComplexity::Complex => {
+            tracing::info!(?task_complexity, "主 Agent 使用 complex_model");
+            complex_model.clone()
+        }
+    };
 
     // 收集 MCP 工具集
     let mcp_toolsets = if let Some(ref gateway) = mcp_gateway {
@@ -171,13 +189,14 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         Vec::new()
     };
 
-    // 创建工具
+    // 创建工具 (保存副本供子 Agent 使用)
     let tools = create_all_tools(
         &config,
         Some(gitlab.clone()),
         Some(config.gitlab.project_id),
         Vec::new(), // MCP 工具通过 toolset 添加到 Agent
-    );
+    )?;
+    let sub_tools = tools.clone();
 
     // 创建回调 (注入 SOP 配置)
     let callbacks = DevnpcCallbacks::new(
@@ -204,10 +223,6 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         devnpc::error::DevnpcError::Config(format!("Agent 构建失败: {e}"))
     })?;
 
-    // 创建模型路由
-    let simple_model = create_simple_model(&config)?;
-    let complex_model = create_complex_model(&config)?;
-
     // 初始化长期记忆
     let memory_store = if config.memory.enabled {
         let store = devnpc::adapter::memory::MemoryStore::new(config.memory.clone());
@@ -220,30 +235,225 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         None
     };
 
-    // 构建子 Agent (预留，后续扩展)
-    let code_agent = None;
-    let fix_agent = None;
-    let review_agent = None;
+    // 加载 npc-config (角色 + SOP),失败时降级为硬编码默认指令
+    let npc_config = if config.npc_config.enabled {
+        let config_dir = std::path::Path::new(&config.npc_config.base_dir);
+        match NpcConfig::load(config_dir) {
+            Ok(c) => {
+                tracing::info!(
+                    roles = c.roles.len(),
+                    sops = c.sops.len(),
+                    teams = c.teams.len(),
+                    "npc-config 已加载,子 Agent 将使用 YAML 角色配置"
+                );
+                Some(c)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "npc-config 加载失败,子 Agent 降级使用默认指令");
+                None
+            }
+        }
+    } else {
+        tracing::info!("npc-config 已禁用,子 Agent 使用默认指令");
+        None
+    };
+
+    // 角色映射:
+    // - code_agent → developer + feature sop (功能开发)
+    // - fix_agent → developer + bugfix sop (Bug 修复)
+    // - review_agent → tester + test-gen sop (测试验证)
+    let (code_role, code_sop) = npc_config
+        .as_ref()
+        .and_then(|c| c.role_with_default_sop("developer"))
+        .map(|(r, s)| {
+            let sop = npc_config.as_ref().and_then(|c| c.sop("feature")).or(s);
+            (Some(r), sop)
+        })
+        .unwrap_or((None, None));
+
+    let (fix_role, fix_sop) = npc_config
+        .as_ref()
+        .and_then(|c| c.role_with_default_sop("developer"))
+        .map(|(r, s)| (Some(r), s))
+        .unwrap_or((None, None));
+
+    let (review_role, review_sop) = npc_config
+        .as_ref()
+        .and_then(|c| c.role_with_default_sop("tester"))
+        .map(|(r, s)| (Some(r), s))
+        .unwrap_or((None, None));
+
+    // PM 角色: pm + requirement-decompose sop (用于 Team 编排的需求分解阶段)
+    let (pm_role, pm_sop) = npc_config
+        .as_ref()
+        .and_then(|c| c.role_with_default_sop("pm"))
+        .map(|(r, s)| {
+            let sop = npc_config.as_ref().and_then(|c| c.sop("requirement-decompose")).or(s);
+            (Some(r), sop)
+        })
+        .unwrap_or((None, None));
+
+    // Skill 匹配: 根据任务类型和描述自动匹配领域专家技能
+    // - Fix 任务 → 匹配 fix 类型的 skills (如 security)
+    // - Review 任务 → 匹配 review 类型的 skills (如 security)
+    // - Implement/Refactor → 匹配 implement 类型的 skills (如 frontend/backend/database)
+    let matched_skills: Vec<&devnpc::config::skill::Skill> = npc_config
+        .as_ref()
+        .map(|c| c.skills.match_skills(&task_spec.kind, &task_spec.description))
+        .unwrap_or_default();
+
+    if !matched_skills.is_empty() {
+        let names: Vec<&str> = matched_skills.iter().map(|s| s.name.as_str()).collect();
+        tracing::info!(skills = ?names, "匹配到领域技能,将注入子 Agent");
+    }
+
+    // 为不同子 Agent 选择合适的 skills:
+    // - code_agent: implement/refactor 类型技能 (frontend/backend/database)
+    // - fix_agent:  fix 类型技能 (security)
+    // - review_agent: review 类型技能 (security)
+    let code_skills: Vec<&devnpc::config::skill::Skill> = matched_skills
+        .iter()
+        .filter(|s| {
+            s.scenarios.task_kinds.iter().any(|k| k == "implement" || k == "refactor")
+        })
+        .copied()
+        .collect();
+    let fix_skills: Vec<&devnpc::config::skill::Skill> = matched_skills
+        .iter()
+        .filter(|s| s.scenarios.task_kinds.iter().any(|k| k == "fix"))
+        .copied()
+        .collect();
+    let review_skills: Vec<&devnpc::config::skill::Skill> = matched_skills
+        .iter()
+        .filter(|s| s.scenarios.task_kinds.iter().any(|k| k == "review"))
+        .copied()
+        .collect();
+
+    // 构建子 Agent (按职责分配模型 + 角色/SOP/Skill 三层注入)
+    // - Code Agent: 代码修改 → complex_model + developer role + feature sop + implement skills
+    // - Fix Agent:  CI 修复 → complex_model + developer role + bugfix sop + fix skills
+    // - Review Agent: 代码审查 → simple_model + tester role + test-gen sop + review skills
+    let code_agent = match build_code_agent(
+        sub_tools.clone(),
+        complex_model.clone(),
+        code_role,
+        code_sop,
+        &code_skills,
+    ) {
+        Ok(agent) => Some(Arc::new(agent)),
+        Err(e) => {
+            tracing::warn!(error = %e, "Code Agent 构建失败,降级运行");
+            None
+        }
+    };
+    let fix_agent = match build_fix_agent(
+        sub_tools.clone(),
+        complex_model.clone(),
+        fix_role,
+        fix_sop,
+        &fix_skills,
+    ) {
+        Ok(agent) => Some(Arc::new(agent)),
+        Err(e) => {
+            tracing::warn!(error = %e, "Fix Agent 构建失败,降级运行");
+            None
+        }
+    };
+    let review_agent = match build_review_agent(
+        sub_tools.clone(),
+        simple_model.clone(),
+        review_role,
+        review_sop,
+        &review_skills,
+    ) {
+        Ok(agent) => Some(Arc::new(agent)),
+        Err(e) => {
+            tracing::warn!(error = %e, "Review Agent 构建失败,降级运行");
+            None
+        }
+    };
+
+    // PM Agent: 需求分解 → simple_model + pm role + requirement-decompose sop
+    // 用于 Team 编排 (feature-team: PM→Developer→Tester) 的需求拆分阶段
+    let pm_agent = match build_pm_agent(
+        sub_tools.clone(),
+        simple_model.clone(),
+        pm_role,
+        pm_sop,
+        &[], // PM 不注入领域 skills,保持通用需求分解
+    ) {
+        Ok(agent) => Some(Arc::new(agent)),
+        Err(e) => {
+            tracing::warn!(error = %e, "PM Agent 构建失败,Team 编排降级为单 Agent 模式");
+            None
+        }
+    };
 
     // 创建 Orchestrator
-    let orchestrator = Arc::new(devnpc::adapter::orchestrator::Orchestrator::new(
+    let mut orchestrator = devnpc::adapter::orchestrator::Orchestrator::new(
         Arc::new(agent),
-        code_agent,
+        code_agent.clone(),
         fix_agent,
-        review_agent,
+        review_agent.clone(),
         Some(simple_model),
         Some(complex_model),
         memory_store,
-    ));
+    );
+
+    // 注册 Team 编排用角色 Agent (PM→Developer→Tester 协作流程)
+    // 仅当 feature-team 配置存在且 PM Agent 构建成功时启用
+    let team_available = npc_config
+        .as_ref()
+        .and_then(|c| c.team("feature-team"))
+        .is_some()
+        && pm_agent.is_some()
+        && code_agent.is_some()
+        && review_agent.is_some();
+
+    if team_available {
+        if let Some(ref pm) = pm_agent {
+            orchestrator.register_team_agent("pm", pm.clone());
+        }
+        if let Some(ref code) = code_agent {
+            orchestrator.register_team_agent("developer", code.clone());
+        }
+        if let Some(ref review) = review_agent {
+            orchestrator.register_team_agent("tester", review.clone());
+        }
+        tracing::info!("Team 编排已就绪: feature-team (PM→Developer→Tester 协作流程)");
+    }
+
+    let orchestrator = Arc::new(orchestrator);
 
     // 创建 SessionService 和初始状态
     let (session_service, session_id) = create_session_service();
     let initial_state = context.as_ref().map(build_initial_state).unwrap_or_default();
 
     // 执行 Agent
-    let final_text = orchestrator
-        .run(&task_spec.description, session_service, &session_id, initial_state)
-        .await?;
+    // - Team 模式 (Implement 任务 + feature-team 配置就绪): PM→Developer→Tester 协作流程
+    // - 单 Agent 模式 (Fix/Review/其他): 主 Agent 直接执行
+    let use_team_mode = team_available
+        && matches!(task_spec.kind, devnpc::trigger::parser::TaskKind::Implement);
+
+    let final_text = if use_team_mode {
+        let team = npc_config
+            .as_ref()
+            .and_then(|c| c.team("feature-team"))
+            .expect("team_available 隐含 feature-team 配置存在");
+        tracing::info!("启用 Team 编排模式: PM→Developer→Tester 协作流程");
+        let team_result = orchestrator
+            .run_team(team, &task_spec.description)
+            .await?;
+        if team_result.summary.is_empty() {
+            task_spec.description.clone()
+        } else {
+            team_result.summary
+        }
+    } else {
+        orchestrator
+            .run(&task_spec.description, session_service, &session_id, initial_state)
+            .await?
+    };
 
     let end_time = chrono::Utc::now();
     let summary = if final_text.is_empty() {
@@ -269,6 +479,8 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
 
     // 8. 生成报告并发布
     let trajectory = Trajectory::new();
+    // 取出 Orchestrator 累积的真实 token 使用统计
+    let usage_stats = orchestrator.take_usage_stats();
     let report_data = build_report(
         &trajectory,
         &summary,
@@ -276,6 +488,7 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         &task_spec.description,
         start_time,
         end_time,
+        &usage_stats,
     );
     let html = devnpc::report::html::generate_html(&report_data);
     let report_url = publisher::publish(&html, &config.report.target).await?;
@@ -434,6 +647,7 @@ fn build_report(
     task_description: &str,
     start_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
+    usage_stats: &devnpc::adapter::orchestrator::UsageStats,
 ) -> ReportData {
     let llm_calls = trajectory
         .events
@@ -482,15 +696,38 @@ fn build_report(
     };
 
     let duration_secs = (end_time - start_time).num_seconds().max(0) as u64;
-    let input_tokens = llm_calls as u64 * 500;
-    let output_tokens = llm_calls as u64 * 200;
-    let estimated_cost_usd = (input_tokens as f64 * 0.000_001_5) + (output_tokens as f64 * 0.000_002_0);
+    // 优先使用 Orchestrator 累积的真实 token 数据; 若 stats 为零 (无 usage_metadata), 回退到 trajectory 估算
+    let (input_tokens, output_tokens, estimated_cost_usd, effective_llm_calls) =
+        if usage_stats.llm_calls > 0 || usage_stats.total_tokens() > 0 {
+            // 真实 token 数据 (provider 返回的 usage_metadata)
+            let cost = usage_stats.estimated_cost_or_default();
+            tracing::info!(
+                input_tokens = usage_stats.input_tokens,
+                output_tokens = usage_stats.output_tokens,
+                llm_calls = usage_stats.llm_calls,
+                cost_usd = cost,
+                "使用真实 provider usage_metadata 生成报告"
+            );
+            (
+                usage_stats.input_tokens as u64,
+                usage_stats.output_tokens as u64,
+                cost,
+                usage_stats.llm_calls,
+            )
+        } else {
+            // 回退: trajectory 事件计数 * 平均 token 估算 (兼容 provider 未返回 usage 的场景)
+            tracing::warn!("Orchestrator 未累积到 usage_metadata, 回退到固定估算");
+            let in_tok = llm_calls as u64 * 500;
+            let out_tok = llm_calls as u64 * 200;
+            let cost = (in_tok as f64 * 0.000_001_5) + (out_tok as f64 * 0.000_002_0);
+            (in_tok, out_tok, cost, llm_calls as u64)
+        };
 
     ReportData {
         status,
         duration_secs,
         token_total: input_tokens + output_tokens,
-        llm_calls,
+        llm_calls: effective_llm_calls as u32,
         tool_calls,
         ci_retries,
         mr_url,
@@ -518,8 +755,7 @@ fn print_config() -> Result<()> {
             println!("  base_url: {}", config.llm.base_url);
             println!("  model: {}", config.llm.model);
             println!(
-                "  api_key: {}***",
-                config.llm.api_key.chars().take(4).collect::<String>()
+                "  api_key: <configured>",
             );
             println!("GitLab:");
             println!("  url: {}", config.gitlab.url);

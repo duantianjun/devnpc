@@ -1,6 +1,6 @@
 # devnpc P3 ReAct Agent 循环 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 实现自建 ReAct 循环(LLM ↔ Tool 反复迭代) + 8 个自建工具 + 提示词构建 + SOP 偏离检测,使 Agent 能在 mock LLM 驱动下端到端完成"读文件 → 修复 → finish"闭环。
 
@@ -58,7 +58,7 @@
 
 **目标:** 定义 OpenAI Chat Completions API 消息格式所需的 Rust 类型,供 llm_client/loop_/prompt 共用。`ToolCall` 需带 `id`(喂回 tool 结果时要用)。
 
-- [ ] **Step 1: 在 agent/mod.rs 注册 message 模块**
+- [x] **Step 1: 在 agent/mod.rs 注册 message 模块**
 
 替换 `src/agent/mod.rs` 全部内容为:
 
@@ -72,7 +72,7 @@ pub mod prompt;
 pub mod sop;
 ```
 
-- [ ] **Step 2: 创建 src/agent/message.rs 并定义类型**
+- [x] **Step 2: 创建 src/agent/message.rs 并定义类型**
 
 写入 `src/agent/message.rs`:
 
@@ -235,12 +235,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: 运行测试验证通过**
+- [x] **Step 3: 运行测试验证通过**
 
 Run: `cargo test --lib agent::message::tests`
 Expected: PASS (4 tests)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/agent/message.rs src/agent/mod.rs
@@ -256,7 +256,7 @@ git commit -m "feat: agent::message OpenAI 兼容消息类型 (Message/ToolCall/
 
 **目标:** 用 reqwest 直接打 `{base_url}/chat/completions`,请求体含 `messages` + `tools` + `tool_choice: auto`,响应解析 `choices[0].message` 提取 text 与 tool_calls。`arguments` 字段在 OpenAI 协议中是 JSON 字符串,需解析为 `serde_json::Value`。
 
-- [ ] **Step 1: 写 llm_client wiremock 测试 (无工具,纯文本响应)**
+- [x] **Step 1: 写 llm_client wiremock 测试 (无工具,纯文本响应)**
 
 替换 `src/agent/llm_client.rs` 全部内容为(含测试占位):
 
@@ -533,12 +533,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib agent::llm_client::tests`
 Expected: PASS (5 tests)
 
-- [ ] **Step 3: 确认整体编译 (tools 字段序列化为 OpenAI 格式需包装)**
+- [x] **Step 3: 确认整体编译 (tools 字段序列化为 OpenAI 格式需包装)**
 
 Run: `cargo build --lib`
 Expected: 编译成功。
@@ -558,7 +558,7 @@ struct ToolWrapper<'a> {
 
 并将 `ChatCompletionsReq.tools` 字段类型改为 `Option<Vec<ToolWrapper<'a>>>`,在 `complete` 中构造包装。重跑测试确认 `complete_sends_tools_in_request_body` 通过。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/agent/llm_client.rs
@@ -574,7 +574,7 @@ git commit -m "feat: LlmClient reqwest 实现 OpenAI Chat Completions (含 tool_
 
 **目标:** Tool trait 加 `parameters_schema() -> serde_json::Value`(供 LLM 知道参数);ToolRegistry 加 `schemas()`(导出所有工具 schema)和 `call(name, args)`(按名查找执行)。`ToolCall` 类型移到 `agent::message`(Task 1 已定义),`tools/mod.rs` 的旧 `ToolCall`/`ToolResult` 调整:保留 `ToolResult`,删除本地 `ToolCall`,改用 `crate::agent::message::ToolCall`。
 
-- [ ] **Step 1: 写 ToolRegistry schemas/call 测试**
+- [x] **Step 1: 写 ToolRegistry schemas/call 测试**
 
 替换 `src/tools/mod.rs` 全部内容为:
 
@@ -745,7 +745,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 创建 src/tools/finish.rs 空骨架(避免 mod 编译失败)**
+- [x] **Step 2: 创建 src/tools/finish.rs 空骨架(避免 mod 编译失败)**
 
 写入 `src/tools/finish.rs`:
 
@@ -755,17 +755,17 @@ mod tests {
 // 占位,Task 8 填充
 ```
 
-- [ ] **Step 3: 运行测试验证通过**
+- [x] **Step 3: 运行测试验证通过**
 
 Run: `cargo test --lib tools::tests`
 Expected: PASS (4 tests)
 
-- [ ] **Step 4: 确认全量编译**
+- [x] **Step 4: 确认全量编译**
 
 Run: `cargo build --lib`
 Expected: 成功(注意 file_io/git_tool/shell/gitlab_tool 内若有引用旧 `ToolCall` 需改用 `crate::agent::message::ToolCall`,但 P2 阶段这些文件未引用 ToolCall,应无影响)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/tools/mod.rs src/tools/finish.rs
@@ -781,7 +781,7 @@ git commit -m "feat: Tool trait 加 parameters_schema + ToolRegistry schemas/cal
 
 **目标:** 实现 3 个文件工具,复用 `FileIo::validate_path` 做 path traversal 防护。`read_file` 读全量(限 200 行防 token 爆炸);`write_file` 全量写;`list_files` 列目录条目。
 
-- [ ] **Step 1: 写三个工具的测试**
+- [x] **Step 1: 写三个工具的测试**
 
 替换 `src/tools/file_io.rs` 全部内容为:
 
@@ -1100,12 +1100,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib tools::file_io::tests`
 Expected: PASS (8 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/tools/file_io.rs
@@ -1121,7 +1121,7 @@ git commit -m "feat: ReadFile/WriteFile/ListFiles 工具 (path traversal 防护)
 
 **目标:** `git_diff` 调 `git diff HEAD` 返回未提交改动;`git_commit` 调 `GitOps::commit`。两者共享 workspace。
 
-- [ ] **Step 1: 写两个工具的测试**
+- [x] **Step 1: 写两个工具的测试**
 
 替换 `src/tools/git_tool.rs` 全部内容为:
 
@@ -1286,12 +1286,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib tools::git_tool::tests`
 Expected: PASS (4 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/tools/git_tool.rs
@@ -1307,7 +1307,7 @@ git commit -m "feat: GitDiff/GitCommit 工具"
 
 **目标:** `run_command` 在 workspace 内执行命令,白名单限 cargo/rustc/make/just/fmt/clippy,黑名单拦截 rm/cp/mv/curl/wget,超时 120s。用 `tokio::process::Command` + `tokio::time::timeout`。
 
-- [ ] **Step 1: 写 RunCommand 工具测试**
+- [x] **Step 1: 写 RunCommand 工具测试**
 
 替换 `src/tools/shell.rs` 全部内容为:
 
@@ -1513,12 +1513,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib tools::shell::tests`
 Expected: PASS (5 tests)。注意 `run_command_returns_err_on_non_zero_exit` 在无 cargo 环境可能行为不同,若失败可调整为只验证 echo 类。
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/tools/shell.rs
@@ -1534,7 +1534,7 @@ git commit -m "feat: RunCommand 工具 (白名单/黑名单 + 超时)"
 
 **目标:** `create_mr_note` 调 `GitlabApi::create_mr_note(project_id, mr_iid, body)`,供 CI 闭环在 MR 评论。
 
-- [ ] **Step 1: 写 CreateMrNote 工具测试 (用 MockGitlab)**
+- [x] **Step 1: 写 CreateMrNote 工具测试 (用 MockGitlab)**
 
 替换 `src/tools/gitlab_tool.rs` 全部内容为:
 
@@ -1694,12 +1694,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib tools::gitlab_tool::tests`
 Expected: PASS (2 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/tools/gitlab_tool.rs
@@ -1715,7 +1715,7 @@ git commit -m "feat: CreateMrNote 工具 (GitLab MR 评论)"
 
 **目标:** `finish` 工具由 LLM 在任务完成时调用,参数 `summary`。Tool 本身只返回成功(实际终止由 ReactLoop 检测 tool name == "finish" 处理)。
 
-- [ ] **Step 1: 写 Finish 工具测试 + 实现**
+- [x] **Step 1: 写 Finish 工具测试 + 实现**
 
 替换 `src/tools/finish.rs` 全部内容为:
 
@@ -1799,12 +1799,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib tools::finish::tests`
 Expected: PASS (3 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/tools/finish.rs
@@ -1820,7 +1820,7 @@ git commit -m "feat: Finish 工具 (LLM 标记任务完成)"
 
 **目标:** 把 `Context` + 任务描述 + 项目规范渲染成初始消息列表(System + User)。System 注入角色/规范/工具说明;User 注入研发记忆 + 任务。
 
-- [ ] **Step 1: 写 prompt 构建测试**
+- [x] **Step 1: 写 prompt 构建测试**
 
 替换 `src/agent/prompt.rs` 全部内容为:
 
@@ -2059,12 +2059,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib agent::prompt::tests`
 Expected: PASS (4 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/agent/prompt.rs
@@ -2080,7 +2080,7 @@ git commit -m "feat: build_initial_messages (Context + 任务 → System/User �
 
 **目标:** `estimate_current_step` 按 trajectory 中已记录的工具调用推断当前步(取第一个"未完成"步);`check_deviation` 检查本轮 tool_calls 是否在当前步 expected_tools 内,soft 模式返回 `DeviationReport::Soft`。
 
-- [ ] **Step 1: 写 SOP 偏离检测测试**
+- [x] **Step 1: 写 SOP 偏离检测测试**
 
 替换 `src/agent/sop.rs` 全部内容为:
 
@@ -2265,12 +2265,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib agent::sop::tests`
 Expected: PASS (5 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/agent/sop.rs
@@ -2286,7 +2286,7 @@ git commit -m "feat: SOP estimate_current_step + check_deviation (软约束)"
 
 **目标:** 实现 `ReactLoop::run`:循环 LLM 调用 → 检查 finish → SOP 偏离检测 → 执行工具 → 喂回结果,带迭代上限。返回 `RunResult::Finished` 或 `MaxIterationsReached`。
 
-- [ ] **Step 1: 写 ReactLoop 测试 (mock LLM via wiremock + 真实工具)**
+- [x] **Step 1: 写 ReactLoop 测试 (mock LLM via wiremock + 真实工具)**
 
 替换 `src/agent/loop_.rs` 全部内容为:
 
@@ -2654,12 +2654,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 Run: `cargo test --lib agent::loop_::tests`
 Expected: PASS (4 tests)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/agent/loop_.rs
@@ -2673,22 +2673,22 @@ git commit -m "feat: ReactLoop 完整实现 (LLM↔Tool 循环 + finish 检测 +
 **Files:**
 - 无修改(仅验证)
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 Run: `cargo test --all`
 Expected: 所有测试通过(P2 约 62 + P3 新增约 35 = ~97)
 
-- [ ] **Step 2: clippy 严格检查**
+- [x] **Step 2: clippy 严格检查**
 
 Run: `cargo clippy --all-targets -- -D warnings`
 Expected: 无警告。若有 `unused_import` 等警告,修复后重跑。
 
-- [ ] **Step 3: release 构建**
+- [x] **Step 3: release 构建**
 
 Run: `cargo build --release`
 Expected: 成功
 
-- [ ] **Step 4: CLI 冒烟 (确认 P1/P2 命令仍正常)**
+- [x] **Step 4: CLI 冒烟 (确认 P1/P2 命令仍正常)**
 
 ```powershell
 $env:DEVNPC_API_KEY="sk-test1234567890abcdef"
@@ -2702,7 +2702,7 @@ $env:CI_PROJECT_ID="1"
 ```
 Expected: 两条命令均正常输出,退出码 0
 
-- [ ] **Step 5: Commit 收尾(若有未提交改动)**
+- [x] **Step 5: Commit 收尾(若有未提交改动)**
 
 ```bash
 git status

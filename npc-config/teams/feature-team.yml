@@ -12,7 +12,7 @@ handoff:
     to: [developer, tester]
     trigger: pm 发出 "decomposed" 信号
   - from: developer
-    to: tester
+    to: [tester]
     trigger: developer 发出 "implemented" 信号
 merge:
   strategy: single-mr

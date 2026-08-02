@@ -17,7 +17,7 @@
 **Files:**
 - Modify: `src/config/mod.rs:150-175`
 
-- [ ] **Step 1: 在 config/mod.rs 中新增 McpConfig 和 MemoryConfig**
+- [x] **Step 1: 在 config/mod.rs 中新增 McpConfig 和 MemoryConfig**
 
 ```rust
 // 在 Config 结构体上方新增 (在 ModelRoutingConfig 之后)
@@ -43,7 +43,7 @@ pub struct MemoryConfig {
 }
 ```
 
-- [ ] **Step 2: 在 Config 结构体中添加新字段**
+- [x] **Step 2: 在 Config 结构体中添加新字段**
 
 ```rust
 // 在 Config 结构体中添加:
@@ -53,7 +53,7 @@ pub struct MemoryConfig {
     pub memory: MemoryConfig,
 ```
 
-- [ ] **Step 3: 在 Config::load 中设置默认值**
+- [x] **Step 3: 在 Config::load 中设置默认值**
 
 ```rust
 // 在 Config 返回前添加:
@@ -72,14 +72,14 @@ pub struct MemoryConfig {
             },
 ```
 
-- [ ] **Step 4: 编译验证**
+- [x] **Step 4: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat: add McpConfig and MemoryConfig structs"
@@ -92,7 +92,7 @@ git add -A && git commit -m "feat: add McpConfig and MemoryConfig structs"
 **Files:**
 - Create: `src/adapter/agents.rs`
 
-- [ ] **Step 1: 创建 agents.rs 基础结构**
+- [x] **Step 1: 创建 agents.rs 基础结构**
 
 ```rust
 //! 子 Agent 构建: 为 Orchestrator 提供 Code/Fix/Review Agent
@@ -172,14 +172,14 @@ pub fn build_review_agent(
 }
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat: add sub-agent builders (code/fix/review)"
@@ -192,7 +192,7 @@ git add -A && git commit -m "feat: add sub-agent builders (code/fix/review)"
 **Files:**
 - Create: `src/adapter/orchestrator.rs`
 
-- [ ] **Step 1: 创建 orchestrator.rs**
+- [x] **Step 1: 创建 orchestrator.rs**
 
 ```rust
 //! Orchestrator Agent: 任务拆解、分发、结果汇总
@@ -354,14 +354,14 @@ impl Orchestrator {
 }
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat: add Orchestrator with sub-agent dispatching"
@@ -374,7 +374,7 @@ git add -A && git commit -m "feat: add Orchestrator with sub-agent dispatching"
 **Files:**
 - Create: `src/adapter/mcp_gateway.rs`
 
-- [ ] **Step 1: 创建 mcp_gateway.rs**
+- [x] **Step 1: 创建 mcp_gateway.rs**
 
 ```rust
 //! MCP Gateway: 管理 MCP 客户端连接
@@ -492,14 +492,14 @@ impl McpGateway {
 }
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat: add MCP Gateway with server registration"
@@ -512,7 +512,7 @@ git add -A && git commit -m "feat: add MCP Gateway with server registration"
 **Files:**
 - Modify: `src/adapter/mod.rs`
 
-- [ ] **Step 1: 添加新模块导出**
+- [x] **Step 1: 添加新模块导出**
 
 ```rust
 pub mod agents;
@@ -520,14 +520,14 @@ pub mod mcp_gateway;
 pub mod orchestrator;
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "chore: export agents, orchestrator, mcp_gateway modules"
@@ -540,7 +540,7 @@ git add -A && git commit -m "chore: export agents, orchestrator, mcp_gateway mod
 **Files:**
 - Modify: `src/adapter/provider.rs`
 
-- [ ] **Step 1: 新增 create_simple_model 和 create_complex_model 函数**
+- [x] **Step 1: 新增 create_simple_model 和 create_complex_model 函数**
 
 ```rust
 // 在 create_model 函数之后添加:
@@ -558,14 +558,14 @@ pub fn create_complex_model(config: &crate::config::LlmConfig) -> Result<Arc<dyn
 }
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat: add create_simple_model and create_complex_model"
@@ -578,7 +578,7 @@ git add -A && git commit -m "feat: add create_simple_model and create_complex_mo
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: 添加 Orchestrator 构建和 FixHandlerImpl**
+- [x] **Step 1: 添加 Orchestrator 构建和 FixHandlerImpl**
 
 ```rust
 // 在 run() 函数中，替换 NoopFixHandler 为 FixHandlerImpl
@@ -640,7 +640,7 @@ let final_text = orchestrator
     .await?;
 ```
 
-- [ ] **Step 2: 替换 NoopFixHandler 为 FixHandlerImpl**
+- [x] **Step 2: 替换 NoopFixHandler 为 FixHandlerImpl**
 
 ```rust
 // 替换 NoopFixHandler 结构体和实现:
@@ -658,7 +658,7 @@ impl FixHandler for FixHandlerImpl {
 }
 ```
 
-- [ ] **Step 3: 修改 CiController 调用，传入 FixHandlerImpl**
+- [x] **Step 3: 修改 CiController 调用，传入 FixHandlerImpl**
 
 ```rust
 // 在 run_ci_controller 函数中:
@@ -673,21 +673,21 @@ let controller = CiController::new(
 );
 ```
 
-- [ ] **Step 4: 编译验证**
+- [x] **Step 4: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 5: 运行测试验证**
+- [x] **Step 5: 运行测试验证**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add -A && git commit -m "refactor: integrate Orchestrator and FixHandlerImpl"
@@ -700,7 +700,7 @@ git add -A && git commit -m "refactor: integrate Orchestrator and FixHandlerImpl
 **Files:**
 - Modify: `src/adapter/tools.rs`
 
-- [ ] **Step 1: 修改 create_all_tools 签名，增加 MCP 工具参数**
+- [x] **Step 1: 修改 create_all_tools 签名，增加 MCP 工具参数**
 
 ```rust
 /// 创建所有业务工具的 FunctionTool 包装
@@ -747,7 +747,7 @@ pub fn create_all_tools(
 }
 ```
 
-- [ ] **Step 2: 更新 main.rs 中 create_all_tools 的调用**
+- [x] **Step 2: 更新 main.rs 中 create_all_tools 的调用**
 
 ```rust
 // 在 main.rs 中:
@@ -762,21 +762,21 @@ let tools = create_all_tools(
 );
 ```
 
-- [ ] **Step 3: 编译验证**
+- [x] **Step 3: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat: integrate MCP tools into create_all_tools"
@@ -792,7 +792,7 @@ git add -A && git commit -m "feat: integrate MCP tools into create_all_tools"
 - Modify: `src/ci/controller.rs`
 - Modify: `src/main.rs` (已完成 FixHandlerImpl)
 
-- [ ] **Step 1: 增强 CiController 的修复反馈**
+- [x] **Step 1: 增强 CiController 的修复反馈**
 
 ```rust
 // 在 controller.rs 的 run_fix_cycle 方法中，增加修复进度 MR 评论通知
@@ -816,21 +816,21 @@ if let Err(e) = self
 }
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add -A && git commit -m "feat: enhance CI fix loop with MR progress comments"
@@ -844,7 +844,7 @@ git add -A && git commit -m "feat: enhance CI fix loop with MR progress comments
 - Modify: `src/adapter/provider.rs`
 - Modify: `src/adapter/orchestrator.rs`
 
-- [ ] **Step 1: 完善 provider.rs 的二级模型路由逻辑**
+- [x] **Step 1: 完善 provider.rs 的二级模型路由逻辑**
 
 ```rust
 /// 创建简单任务模型 (小模型，用于阅读/搜索)
@@ -875,7 +875,7 @@ pub fn create_complex_model(config: &crate::config::LlmConfig) -> Result<Arc<dyn
 }
 ```
 
-- [ ] **Step 2: 在 Orchestrator 中集成模型路由**
+- [x] **Step 2: 在 Orchestrator 中集成模型路由**
 
 ```rust
 // 在 orchestrator.rs 中，Orchestrator 结构体增加模型路由字段:
@@ -911,7 +911,7 @@ impl Orchestrator {
 }
 ```
 
-- [ ] **Step 3: 更新 main.rs 中的 Orchestrator 构建**
+- [x] **Step 3: 更新 main.rs 中的 Orchestrator 构建**
 
 ```rust
 // 创建模型路由
@@ -929,21 +929,21 @@ let orchestrator = Arc::new(devnpc::adapter::orchestrator::Orchestrator::new(
 ));
 ```
 
-- [ ] **Step 4: 编译验证**
+- [x] **Step 4: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add -A && git commit -m "feat: implement two-level model routing"
@@ -958,7 +958,7 @@ git add -A && git commit -m "feat: implement two-level model routing"
 - Modify: `src/adapter/orchestrator.rs`
 - Modify: `src/adapter/mod.rs`
 
-- [ ] **Step 1: 创建 memory.rs 基础实现**
+- [x] **Step 1: 创建 memory.rs 基础实现**
 
 ```rust
 //! 长期记忆系统: 跨会话积累项目知识和经验
@@ -1047,13 +1047,13 @@ impl MemoryStore {
 }
 ```
 
-- [ ] **Step 2: 更新 adapter/mod.rs**
+- [x] **Step 2: 更新 adapter/mod.rs**
 
 ```rust
 pub mod memory;
 ```
 
-- [ ] **Step 3: 在 Orchestrator 中集成记忆注入**
+- [x] **Step 3: 在 Orchestrator 中集成记忆注入**
 
 ```rust
 // 在 orchestrator.rs 中:
@@ -1103,21 +1103,21 @@ impl Orchestrator {
 }
 ```
 
-- [ ] **Step 4: 编译验证**
+- [x] **Step 4: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add -A && git commit -m "feat: add long-term memory store with SQLite"
@@ -1130,7 +1130,7 @@ git add -A && git commit -m "feat: add long-term memory store with SQLite"
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: 在 run() 函数中启动 MCP Gateway**
+- [x] **Step 1: 在 run() 函数中启动 MCP Gateway**
 
 ```rust
 // 在 "3. dry_run 模式" 之后，"4. 解析触发源" 之前:
@@ -1159,21 +1159,21 @@ let mcp_tools = mcp_gateway.as_ref()
     .unwrap_or_default();
 ```
 
-- [ ] **Step 2: 编译验证**
+- [x] **Step 2: 编译验证**
 
 ```bash
 cargo check 2>&1
 ```
 Expected: 编译通过，无错误
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add -A && git commit -m "feat: integrate MCP Gateway into startup flow"
@@ -1185,28 +1185,28 @@ git add -A && git commit -m "feat: integrate MCP Gateway into startup flow"
 
 ### 任务 13：全量验证
 
-- [ ] **Step 1: 运行所有测试**
+- [x] **Step 1: 运行所有测试**
 
 ```bash
 cargo test --all 2>&1
 ```
 Expected: 所有测试通过
 
-- [ ] **Step 2: Clippy 零警告**
+- [x] **Step 2: Clippy 零警告**
 
 ```bash
 cargo clippy -- -D warnings 2>&1
 ```
 Expected: 零警告
 
-- [ ] **Step 3: Release 构建**
+- [x] **Step 3: Release 构建**
 
 ```bash
 cargo build --release 2>&1
 ```
 Expected: 构建成功
 
-- [ ] **Step 4: 提交最终验证**
+- [x] **Step 4: 提交最终验证**
 
 ```bash
 git add -A && git commit -m "chore: verification pass - all tests pass, clippy clean"

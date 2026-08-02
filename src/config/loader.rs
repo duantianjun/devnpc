@@ -213,6 +213,12 @@ fn load_internal(
                 .unwrap_or(false),
             db_path: env::get_or_default("DEVNPC_MEMORY_DB_PATH", ".devnpc-memory.db"),
         },
+        npc_config: crate::config::NpcConfigSection {
+            enabled: env::get_optional("DEVNPC_NPC_CONFIG_ENABLED")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            base_dir: env::get_or_default("DEVNPC_NPC_CONFIG_DIR", "npc-config"),
+        },
     })
 }
 

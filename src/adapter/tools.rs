@@ -24,8 +24,10 @@ pub fn create_all_tools(
     gitlab: Option<Arc<dyn GitlabApi>>,
     project_id: Option<u64>,
     mcp_tools: Vec<Arc<dyn Tool>>,
-) -> Vec<Arc<dyn Tool>> {
-    let workspace = std::env::current_dir().expect("获取工作目录失败");
+) -> std::result::Result<Vec<Arc<dyn Tool>>, crate::error::DevnpcError> {
+    let workspace = std::env::current_dir().map_err(|e| {
+        crate::error::DevnpcError::Config(format!("获取工作目录失败: {e}"))
+    })?;
     let file_io = FileIo::new(&workspace);
     let git_ops = GitOps::new(&workspace);
 
@@ -55,7 +57,7 @@ pub fn create_all_tools(
     // 合并 MCP 工具
     tools.extend(mcp_tools);
 
-    tools
+    Ok(tools)
 }
 
 /// read_file: 读取 workspace 内文件 (限前 N 行)
@@ -177,6 +179,13 @@ fn create_run_command_tool(
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 cmd 参数")
                 })?;
 
+                // 路径分隔符检查: 防止 ./cargo、cargo/../malicious 等路径变体绕过白名单
+                if cmd.contains('/') || cmd.contains('\\') || cmd.contains('\0') {
+                    return Ok(serde_json::json!({
+                        "error": format!("命令 {cmd} 包含非法字符 (路径分隔符),仅允许裸命令名"),
+                        "success": false
+                    }));
+                }
                 // 黑名单优先
                 if denylist.iter().any(|d| d == cmd) {
                     return Ok(serde_json::json!({
@@ -428,7 +437,9 @@ fn interesting_kinds(lang: Language) -> &'static [&'static str] {
 }
 
 /// 解析源码的 tree-sitter 辅助函数 (支持多语言,使用线程局部缓存)
-fn parse_source(source: &str, lang: Language) -> tree_sitter::Tree {
+///
+/// 返回 Result 而非 panic,错误通过 AdkError 传播。
+fn parse_source(source: &str, lang: Language) -> std::result::Result<tree_sitter::Tree, adk_rust::AdkError> {
     use std::cell::RefCell;
     thread_local! {
         static RUST_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
@@ -456,13 +467,28 @@ fn parse_source(source: &str, lang: Language) -> tree_sitter::Tree {
         let mut guard = cell.borrow_mut();
         let parser = guard.get_or_insert_with(|| {
             let mut p = tree_sitter::Parser::new();
-            p.set_language(&get_language(lang))
-                .unwrap_or_else(|_| panic!("tree-sitter {:?} 语言初始化失败", lang));
+            if let Err(e) = p.set_language(&get_language(lang)) {
+                tracing::error!(lang = ?lang, error = %e, "tree-sitter 语言初始化失败");
+            }
             p
         });
-        parser
-            .parse(source, None)
-            .expect("tree-sitter 解析失败")
+        // 检查语言是否已设置 (set_language 失败后 parser 仍存在但无语言)
+        if parser.language().is_none() {
+            return Err(adk_rust::AdkError::new(
+                adk_rust::ErrorComponent::Tool,
+                adk_rust::ErrorCategory::Internal,
+                "PARSE_ERROR",
+                format!("tree-sitter {:?} 语言初始化失败", lang),
+            ));
+        }
+        parser.parse(source, None).ok_or_else(|| {
+            adk_rust::AdkError::new(
+                adk_rust::ErrorComponent::Tool,
+                adk_rust::ErrorCategory::Internal,
+                "PARSE_ERROR",
+                "tree-sitter 解析失败 (内存不足或输入过大)".to_string(),
+            )
+        })
     })
 }
 
@@ -567,7 +593,7 @@ fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Langua
     let source = std::fs::read_to_string(&full).map_err(|e| {
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
     })?;
-    let tree = parse_source(&source, lang);
+    let tree = parse_source(&source, lang)?;
     Ok((tree, lang))
 }
 
@@ -676,7 +702,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
                 new_source.push_str(&source[end..]);
 
                 // 验证新源码能通过 tree-sitter 解析
-                let new_tree = parse_source(&new_source, lang);
+                let new_tree = parse_source(&new_source, lang)?;
                 if new_tree.root_node().has_error() {
                     return Ok(serde_json::json!({
                         "error": "替换后的源码语法错误,操作已取消",
@@ -732,7 +758,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
-                    let tree = parse_source(&source, lang);
+                    let tree = parse_source(&source, lang)?;
                     let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, lang);
                     for sym in &symbols {
                         if regex.is_match(&sym.name) {
@@ -796,7 +822,7 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
                 }
 
                 // 验证语法
-                let new_tree = parse_source(&new_source, lang);
+                let new_tree = parse_source(&new_source, lang)?;
                 if new_tree.root_node().has_error() {
                     return Ok(serde_json::json!({
                         "error": "替换后源码语法错误,操作已取消",
@@ -811,4 +837,779 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
             })
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CommandConfig, ReadFileConfig};
+    use adk_rust::Tool;
+    use std::fs;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// 构造测试用 ToolContext
+    fn make_ctx() -> Arc<dyn adk_rust::tool::ToolContext> {
+        Arc::new(adk_rust::tool::SimpleToolContext::new("test"))
+    }
+
+    /// 创建临时 workspace 并写入示例文件
+    fn setup_workspace() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.rs"),
+            "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn main() {\n    println!(\"{}\", add(1, 2));\n}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hello() -> i32 { 42 }\n").unwrap();
+        fs::write(dir.path().join("README.md"), "# Test\n").unwrap();
+        dir
+    }
+
+    // ====================================================================
+    // 辅助函数测试
+    // ====================================================================
+
+    #[test]
+    fn detect_language_recognizes_all_supported_extensions() {
+        assert_eq!(detect_language(std::path::Path::new("a.rs")), Some(Language::Rust));
+        assert_eq!(detect_language(std::path::Path::new("A.java")), Some(Language::Java));
+        assert_eq!(detect_language(std::path::Path::new("b.py")), Some(Language::Python));
+        assert_eq!(detect_language(std::path::Path::new("c.js")), Some(Language::JavaScript));
+        assert_eq!(detect_language(std::path::Path::new("d.jsx")), Some(Language::JavaScript));
+        assert_eq!(detect_language(std::path::Path::new("e.ts")), Some(Language::TypeScript));
+        assert_eq!(detect_language(std::path::Path::new("f.tsx")), Some(Language::Tsx));
+        assert_eq!(detect_language(std::path::Path::new("g.go")), Some(Language::Go));
+        assert_eq!(detect_language(std::path::Path::new("h.c")), Some(Language::C));
+        assert_eq!(detect_language(std::path::Path::new("i.h")), Some(Language::C));
+        assert_eq!(detect_language(std::path::Path::new("j.cpp")), Some(Language::Cpp));
+        assert_eq!(detect_language(std::path::Path::new("k.hpp")), Some(Language::Cpp));
+        assert_eq!(detect_language(std::path::Path::new("l.cc")), Some(Language::Cpp));
+    }
+
+    #[test]
+    fn detect_language_returns_none_for_unsupported() {
+        assert_eq!(detect_language(std::path::Path::new("file.txt")), None);
+        assert_eq!(detect_language(std::path::Path::new("file.md")), None);
+        assert_eq!(detect_language(std::path::Path::new("noext")), None);
+    }
+
+    #[test]
+    fn parse_source_succeeds_for_valid_rust() {
+        let src = "fn main() {}";
+        let result = parse_source(src, Language::Rust);
+        assert!(result.is_ok(), "解析有效 Rust 应成功");
+        let tree = result.unwrap();
+        assert!(!tree.root_node().has_error(), "解析结果不应有语法错误");
+    }
+
+    #[test]
+    fn parse_source_handles_empty_input() {
+        let result = parse_source("", Language::Rust);
+        assert!(result.is_ok(), "空输入应可解析");
+    }
+
+    #[test]
+    fn collect_source_files_skips_target_and_git() {
+        let dir = tempfile::tempdir().unwrap();
+        // 正常源文件
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        // target 目录 (应跳过)
+        fs::create_dir_all(dir.path().join("target")).unwrap();
+        fs::write(dir.path().join("target/gen.rs"), "// skip").unwrap();
+        // .git 目录 (应跳过)
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/hook.rs"), "// skip").unwrap();
+        // node_modules (应跳过)
+        fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        fs::write(dir.path().join("node_modules/lib.js"), "// skip").unwrap();
+
+        let mut results = Vec::new();
+        collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
+        // 仅应收集到 main.rs
+        assert_eq!(results.len(), 1, "应仅收集 1 个文件,实际: {:?}", results);
+        assert!(results[0].ends_with("main.rs"));
+    }
+
+    #[test]
+    fn collect_source_files_limits_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        // 深度 > 10 的文件不应被收集
+        let mut deep = dir.path().to_path_buf();
+        for _ in 0..15 {
+            deep = deep.join("d");
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("deep.rs"), "fn deep() {}").unwrap();
+
+        let mut results = Vec::new();
+        collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
+        assert!(results.is_empty(), "深度 > 10 的文件不应被收集,实际: {:?}", results);
+    }
+
+    #[test]
+    fn collect_symbols_extracts_rust_functions() {
+        let src = "fn foo() {}\nfn bar() -> i32 { 42 }\nfn main() {}\n";
+        let tree = parse_source(src, Language::Rust).unwrap();
+        let symbols = collect_symbols(tree.root_node(), src.as_bytes(), 0, Language::Rust);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foo"), "应包含 foo,实际: {:?}", names);
+        assert!(names.contains(&"bar"), "应包含 bar,实际: {:?}", names);
+        assert!(names.contains(&"main"), "应包含 main,实际: {:?}", names);
+    }
+
+    #[test]
+    fn collect_symbols_respects_depth_limit() {
+        // 构造一个深度嵌套的结构 (不会在正常 Rust 中发生,但验证保护逻辑)
+        let src = "fn main() {}";
+        let tree = parse_source(src, Language::Rust).unwrap();
+        let symbols = collect_symbols(tree.root_node(), src.as_bytes(), 25, Language::Rust);
+        assert!(symbols.is_empty(), "超过深度限制应返回空");
+    }
+
+    #[test]
+    fn find_symbol_node_locates_existing_symbol() {
+        let src = "fn foo() {}\nfn bar() {}\n";
+        let tree = parse_source(src, Language::Rust).unwrap();
+        let node = find_symbol_node(tree.root_node(), src.as_bytes(), "foo", 0, Language::Rust);
+        assert!(node.is_some(), "应找到 foo");
+    }
+
+    #[test]
+    fn find_symbol_node_returns_none_for_missing() {
+        let src = "fn foo() {}\n";
+        let tree = parse_source(src, Language::Rust).unwrap();
+        let node = find_symbol_node(tree.root_node(), src.as_bytes(), "nonexistent", 0, Language::Rust);
+        assert!(node.is_none(), "不存在的符号应返回 None");
+    }
+
+    // ====================================================================
+    // run_command 工具测试 (安全关键: 白名单/黑名单/路径分隔符)
+    // ====================================================================
+
+    #[tokio::test]
+    async fn run_command_rejects_path_separator_in_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        // ./cargo 应被路径分隔符检查拦截
+        let result = tool
+            .execute(ctx, serde_json::json!({"cmd": "./cargo", "args": []}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].as_str().unwrap().contains("路径分隔符"));
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_backslash_in_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"cmd": "cargo\\..\\evil", "args": []}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].as_str().unwrap().contains("路径分隔符"));
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_null_byte_in_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"cmd": "cargo\0evil", "args": []}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].as_str().unwrap().contains("路径分隔符"));
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_blacklisted_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        // rm 在黑名单中 (黑名单优先于白名单)
+        let result = tool
+            .execute(ctx, serde_json::json!({"cmd": "rm", "args": ["-rf", "/"]}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].as_str().unwrap().contains("黑名单"));
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_non_allowlisted_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        // ls 不在白名单中
+        let result = tool
+            .execute(ctx, serde_json::json!({"cmd": "ls", "args": []}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].as_str().unwrap().contains("白名单"));
+    }
+
+    #[tokio::test]
+    async fn run_command_executes_allowlisted_cargo() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        // cargo 在白名单中且开发环境必然存在; --version 不依赖 Cargo.toml
+        let result = tool
+            .execute(ctx, serde_json::json!({"cmd": "cargo", "args": ["--version"]}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "cargo --version 应成功: {:?}", result);
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("cargo"), "输出应包含 cargo: {}", output);
+    }
+
+    #[tokio::test]
+    async fn run_command_missing_cmd_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CommandConfig::default();
+        let tool = create_run_command_tool(dir.path().to_path_buf(), &config);
+        let ctx = make_ctx();
+        let result = tool.execute(ctx, serde_json::json!({"args": []})).await;
+        assert!(result.is_err(), "缺少 cmd 参数应返回 Err");
+    }
+
+    // ====================================================================
+    // read_file 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn read_file_returns_content_for_existing_file() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_read_file_tool(file_io, &ReadFileConfig { max_lines: 200 });
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "README.md"}))
+            .await
+            .unwrap();
+        assert_eq!(result["content"].as_str().unwrap(), "# Test");
+    }
+
+    #[tokio::test]
+    async fn read_file_truncates_to_max_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("multi.txt"), "line1\nline2\nline3\nline4\n").unwrap();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_read_file_tool(file_io, &ReadFileConfig { max_lines: 2 });
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "multi.txt"}))
+            .await
+            .unwrap();
+        let content = result["content"].as_str().unwrap();
+        assert!(content.contains("line1"));
+        assert!(content.contains("line2"));
+        assert!(!content.contains("line3"), "超过 max_lines 应被截断");
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_path_traversal() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_read_file_tool(file_io, &ReadFileConfig { max_lines: 200 });
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "../etc/passwd"}))
+            .await;
+        assert!(result.is_err(), "路径越界应返回 Err");
+    }
+
+    #[tokio::test]
+    async fn read_file_missing_path_returns_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_read_file_tool(file_io, &ReadFileConfig { max_lines: 200 });
+        let ctx = make_ctx();
+        let result = tool.execute(ctx, serde_json::json!({})).await;
+        assert!(result.is_err());
+    }
+
+    // ====================================================================
+    // write_file 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn write_file_creates_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_write_file_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "new.rs", "content": "fn main() {}"}))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "ok");
+        let written = fs::read_to_string(dir.path().join("new.rs")).unwrap();
+        assert_eq!(written, "fn main() {}");
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_write_file_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({"path": "src/sub/deep.rs", "content": "fn deep() {}"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "ok");
+        assert!(dir.path().join("src/sub/deep.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("old.txt"), "old content").unwrap();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_write_file_tool(file_io);
+        let ctx = make_ctx();
+        tool.execute(ctx, serde_json::json!({"path": "old.txt", "content": "new content"}))
+            .await
+            .unwrap();
+        let content = fs::read_to_string(dir.path().join("old.txt")).unwrap();
+        assert_eq!(content, "new content");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_path_traversal() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_write_file_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "../evil.txt", "content": "x"}))
+            .await;
+        assert!(result.is_err(), "路径越界应返回 Err");
+    }
+
+    #[tokio::test]
+    async fn write_file_missing_content_returns_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_write_file_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool.execute(ctx, serde_json::json!({"path": "x.rs"})).await;
+        assert!(result.is_err());
+    }
+
+    // ====================================================================
+    // list_files 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn list_files_returns_directory_entries() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_list_files_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"dir": ""}))
+            .await
+            .unwrap();
+        let entries: Vec<_> = result["entries"].as_array().unwrap().clone();
+        let names: Vec<_> = entries
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"main.rs".to_string()), "应包含 main.rs: {:?}", names);
+        assert!(names.contains(&"src/".to_string()), "src 应标记为目录: {:?}", names);
+        assert!(names.contains(&"README.md".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_files_nonexistent_dir_returns_error_field() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_list_files_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"dir": "nonexistent"}))
+            .await
+            .unwrap();
+        assert!(result.get("error").is_some(), "不存在目录应返回 error 字段");
+    }
+
+    #[tokio::test]
+    async fn list_files_on_file_returns_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_list_files_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"dir": "README.md"}))
+            .await
+            .unwrap();
+        assert!(result.get("error").is_some(), "对文件调用应返回 error");
+    }
+
+    // ====================================================================
+    // aft_outline 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn aft_outline_lists_rust_symbols() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_outline_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "main.rs"}))
+            .await
+            .unwrap();
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("add"), "应包含 add 符号: {}", output);
+        assert!(output.contains("main"), "应包含 main 符号: {}", output);
+    }
+
+    #[tokio::test]
+    async fn aft_outline_returns_no_symbols_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("empty.rs"), "// just a comment\n").unwrap();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_outline_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "empty.rs"}))
+            .await
+            .unwrap();
+        assert_eq!(result["output"].as_str().unwrap(), "(无顶层符号)");
+    }
+
+    #[tokio::test]
+    async fn aft_outline_rejects_unsupported_extension() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_outline_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool.execute(ctx, serde_json::json!({"path": "README.md"})).await;
+        assert!(result.is_err(), "不支持的文件类型应返回 Err");
+    }
+
+    // ====================================================================
+    // aft_view_symbol 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn aft_view_symbol_returns_definition() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_view_symbol_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "main.rs", "symbol": "add"}))
+            .await
+            .unwrap();
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("a + b"), "应返回 add 函数体: {}", output);
+    }
+
+    #[tokio::test]
+    async fn aft_view_symbol_missing_symbol_returns_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_view_symbol_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"path": "main.rs", "symbol": "nonexistent"}))
+            .await;
+        assert!(result.is_err(), "不存在的符号应返回 Err");
+    }
+
+    // ====================================================================
+    // aft_edit_symbol 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn aft_edit_symbol_replaces_definition() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_edit_symbol_tool(file_io);
+        let ctx = make_ctx();
+        let new_def = "fn add(a: i32, b: i32) -> i32 {\n    a * b\n}";
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({"path": "main.rs", "symbol": "add", "content": new_def}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "替换应成功: {:?}", result);
+        let content = fs::read_to_string(dir.path().join("main.rs")).unwrap();
+        assert!(content.contains("a * b"), "新内容应写入: {}", content);
+        assert!(!content.contains("a + b"), "旧内容应被替换");
+    }
+
+    #[tokio::test]
+    async fn aft_edit_symbol_cancels_on_syntax_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_edit_symbol_tool(file_io);
+        let ctx = make_ctx();
+        // 故意写语法错误的代码
+        let broken = "fn add(a: i32, b: i32) -> i32 { a +"; // 不完整
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({"path": "main.rs", "symbol": "add", "content": broken}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false, "语法错误应取消: {:?}", result);
+        assert!(result["error"].as_str().unwrap().contains("语法错误"));
+        // 原文件应保持不变
+        let content = fs::read_to_string(dir.path().join("main.rs")).unwrap();
+        assert!(content.contains("a + b"), "原内容应未被修改");
+    }
+
+    // ====================================================================
+    // aft_search_symbols 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn aft_search_symbols_finds_matches() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_search_symbols_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"pattern": "add"}))
+            .await
+            .unwrap();
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("add"), "应找到 add: {}", output);
+    }
+
+    #[tokio::test]
+    async fn aft_search_symbols_no_match_returns_hint() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_search_symbols_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"pattern": "nonexistent_symbol_xyz"}))
+            .await
+            .unwrap();
+        assert_eq!(result["output"].as_str().unwrap(), "(无匹配符号)");
+    }
+
+    #[tokio::test]
+    async fn aft_search_symbols_invalid_regex_returns_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_search_symbols_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"pattern": "[invalid"}))
+            .await;
+        assert!(result.is_err(), "无效正则应返回 Err");
+    }
+
+    // ====================================================================
+    // aft_ast_replace 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn aft_ast_replace_replaces_match() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_ast_replace_tool(file_io);
+        let ctx = make_ctx();
+        // 将 a + b 替换为 a - b
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({"path": "main.rs", "pattern": "a \\+ b", "replacement": "a - b"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "替换应成功: {:?}", result);
+        let content = fs::read_to_string(dir.path().join("main.rs")).unwrap();
+        assert!(content.contains("a - b"), "应包含新内容");
+    }
+
+    #[tokio::test]
+    async fn aft_ast_replace_no_match_returns_hint() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_ast_replace_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({"path": "main.rs", "pattern": "nonexistent_pattern_xyz"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["output"].as_str().unwrap(), "(无匹配,未修改)");
+    }
+
+    #[tokio::test]
+    async fn aft_ast_replace_cancels_on_syntax_error() {
+        let dir = setup_workspace();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_ast_replace_tool(file_io);
+        let ctx = make_ctx();
+        // 替换为语法错误代码
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({
+                    "path": "main.rs",
+                    "pattern": "a \\+ b",
+                    "replacement": "a +"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false, "语法错误应取消: {:?}", result);
+        assert!(result["error"].as_str().unwrap().contains("语法错误"));
+    }
+
+    #[tokio::test]
+    async fn aft_ast_replace_case_insensitive_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("case.rs"), "fn Foo() {}\nfn foo() {}\n").unwrap();
+        let file_io = FileIo::new(dir.path());
+        let tool = create_aft_ast_replace_tool(file_io);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(
+                ctx,
+                serde_json::json!({
+                    "path": "case.rs",
+                    "pattern": "foo",
+                    "replacement": "bar",
+                    "flags": "i"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "i 标志应替换所有: {:?}", result);
+        let content = fs::read_to_string(dir.path().join("case.rs")).unwrap();
+        assert!(content.contains("bar"), "替换后内容: {}", content);
+    }
+
+    // ====================================================================
+    // git_diff 工具测试 (需要 git 仓库)
+    // ====================================================================
+
+    /// 初始化临时 git 仓库并提交一个文件
+    fn setup_git_workspace() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        fs::write(repo.join("README.md"), "# initial\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn git_diff_returns_empty_for_clean_workspace() {
+        let dir = setup_git_workspace();
+        let tool = create_git_diff_tool(dir.path().to_path_buf());
+        let ctx = make_ctx();
+        let result = tool.execute(ctx, serde_json::json!({})).await.unwrap();
+        assert_eq!(result["success"], true);
+        let output = result["output"].as_str().unwrap();
+        assert!(output.trim().is_empty(), "干净工作区应返回空 diff: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn git_diff_shows_uncommitted_changes() {
+        let dir = setup_git_workspace();
+        // 修改已提交的文件
+        fs::write(dir.path().join("README.md"), "# modified\n").unwrap();
+        let tool = create_git_diff_tool(dir.path().to_path_buf());
+        let ctx = make_ctx();
+        let result = tool.execute(ctx, serde_json::json!({})).await.unwrap();
+        assert_eq!(result["success"], true);
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("modified"), "应显示修改: {}", output);
+    }
+
+    // ====================================================================
+    // git_commit 工具测试
+    // ====================================================================
+
+    #[tokio::test]
+    async fn git_commit_records_new_files() {
+        let dir = setup_git_workspace();
+        let git_ops = GitOps::new(dir.path());
+        let tool = create_git_commit_tool(git_ops);
+        let ctx = make_ctx();
+        fs::write(dir.path().join("new_file.txt"), "new content").unwrap();
+        let result = tool
+            .execute(ctx, serde_json::json!({"message": "add new file"}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "提交应成功: {:?}", result);
+        // 验证提交记录
+        let log = std::process::Command::new("git")
+            .args(["log", "--oneline", "-1"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let log_str = String::from_utf8_lossy(&log.stdout);
+        assert!(log_str.contains("add new file"), "提交记录应包含消息: {}", log_str);
+    }
+
+    #[tokio::test]
+    async fn git_commit_empty_message_returns_error_field() {
+        let dir = setup_git_workspace();
+        let git_ops = GitOps::new(dir.path());
+        let tool = create_git_commit_tool(git_ops);
+        let ctx = make_ctx();
+        let result = tool
+            .execute(ctx, serde_json::json!({"message": ""}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].as_str().unwrap().contains("message"));
+    }
 }

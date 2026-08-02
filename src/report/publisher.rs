@@ -1,4 +1,4 @@
-//! 报告推送 (P4 完整实现)
+//! 报告推送
 //!
 //! 将 HTML 报告写入 .devnpc-report/ 目录,支持 Artifact / Pages / None 三种目标。
 

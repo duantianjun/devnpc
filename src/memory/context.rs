@@ -1,9 +1,10 @@
-//! 上下文聚合器 (P2 完整实现)
+//! 上下文聚合器
 //!
 //! 并行获取仓库结构、Issue、PR、CI 历史,聚合为 Context。
 
 use serde::Serialize;
 
+use crate::ci::log_parser::{parse_log, FailureType};
 use crate::config::{ContextConfig, ProjectConfig};
 use crate::error::Result;
 use crate::git::ops::GitOps;
@@ -57,35 +58,80 @@ pub struct CiFailure {
     pub root_cause: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum FailureType {
-    Compile,
-    Test,
-    Lint,
-    Other,
-}
-
-/// 从 pipelines 提取失败记录 (P2 简化版: 仅按 status,无日志解析)
+/// 从 failed pipelines 提取失败记录,对每个 pipeline 拉取 failed job 日志并解析根因。
 ///
-/// 详细 job 日志解析留 P4 (ci/log_parser)。
-pub fn extract_failures(pipelines: &[Pipeline], config: &ContextConfig) -> Vec<CiFailure> {
-    pipelines
+/// 流程:
+/// 1. 过滤 status == "failed" 的 pipeline,取前 N 条 (N = config.max_ci_history_failures)
+/// 2. 对每个 failed pipeline: 调用 `get_pipeline_jobs` + `get_job_log` 拉取 failed job 日志
+/// 3. 调用 `ci::log_parser::parse_log` 解析日志,映射为 `CiFailure`
+/// 4. 若某 job 日志解析无结果,生成 fallback 记录 (job_name 真实, type=Other, cause="job failed")
+///
+/// 单个 pipeline/job 的日志获取或解析失败不中断整体流程,跳过该条继续。
+pub async fn extract_failures_with_logs(
+    gitlab: &dyn crate::gitlab_api::GitlabApi,
+    project_id: u64,
+    pipelines: &[Pipeline],
+    config: &ContextConfig,
+) -> Vec<CiFailure> {
+    let mut result = Vec::new();
+    for p in pipelines
         .iter()
         .filter(|p| p.status == "failed")
         .take(config.max_ci_history_failures)
-        .map(|p| CiFailure {
-            pipeline_id: p.id,
-            job_name: "unknown".to_string(),
-            failure_type: FailureType::Other,
-            root_cause: "pipeline failed".to_string(),
-        })
-        .collect()
+    {
+        // 拉取该 pipeline 的 failed job + 日志
+        let job_logs = match crate::gitlab_api::pipelines::fetch_failed_job_logs(
+            gitlab,
+            project_id,
+            p.id,
+        )
+        .await
+        {
+            Ok(jl) => jl,
+            Err(_) => continue, // 日志拉取失败,跳过此 pipeline
+        };
+
+        if job_logs.is_empty() {
+            // pipeline failed 但无 failed job (可能整体 canceled),生成 fallback
+            result.push(CiFailure {
+                pipeline_id: p.id,
+                job_name: "unknown".to_string(),
+                failure_type: FailureType::Other,
+                root_cause: "pipeline failed (no failed jobs)".to_string(),
+            });
+            continue;
+        }
+
+        for jl in job_logs {
+            let parsed = parse_log(&jl.job.name, &jl.log);
+            if parsed.is_empty() {
+                // 日志无可识别模式,生成 fallback
+                result.push(CiFailure {
+                    pipeline_id: p.id,
+                    job_name: jl.job.name.clone(),
+                    failure_type: FailureType::Other,
+                    root_cause: format!("job {} failed (unrecognized log pattern)", jl.job.name),
+                });
+            } else {
+                for pf in parsed {
+                    result.push(CiFailure {
+                        pipeline_id: p.id,
+                        job_name: pf.job_name.clone(),
+                        failure_type: pf.failure_type,
+                        root_cause: pf.error_message,
+                    });
+                }
+            }
+        }
+    }
+    result
 }
 
 impl Context {
-    /// 构建上下文 (P2 完整实现)
+    /// 构建上下文
     ///
-    /// 并行拉取 Git 仓库结构 + GitLab Issue/PR/Notes/CI 历史。
+    /// 并行拉取 Git 仓库结构 + GitLab Issue/PR/Notes/CI 历史,
+    /// 随后对 failed pipeline 拉取 job 日志并解析根因。
     pub async fn build(
         gitlab: &dyn crate::gitlab_api::GitlabApi,
         git: &GitOps,
@@ -93,6 +139,7 @@ impl Context {
         issue_iid: u64,
         summary_config: &crate::config::SummaryConfig,
         context_config: &ContextConfig,
+        project_config: &ProjectConfig,
     ) -> Result<Self> {
         // 并行: Git 侧 (repo_tree) + GitLab 侧 (issue/related_mrs/notes/pipelines)
         // Git 侧是同步 I/O,用 spawn_blocking 避免阻塞异步运行时
@@ -116,10 +163,8 @@ impl Context {
             )?;
 
         let key_files = crate::memory::repo_index::select_key_files(&repo_tree, &git.workspace, summary_config);
-        let ci_failures = extract_failures(&pipelines, context_config);
-
-        // project_config: P2 阶段用默认;完整集成(读 .devnpc.md)留 P3 npc runner
-        let project_config = ProjectConfig::default();
+        // 对 failed pipeline 拉取 job 日志并解析根因 (串行,避免与 try_join 的 gitlab 借用冲突)
+        let ci_failures = extract_failures_with_logs(gitlab, project_id, &pipelines, context_config).await;
 
         Ok(Self {
             repo_tree,
@@ -129,7 +174,7 @@ impl Context {
             issue_notes,
             recent_commits,
             ci_failures,
-            project_config,
+            project_config: project_config.clone(),
         })
     }
 }
@@ -138,7 +183,7 @@ impl Context {
 mod tests {
     use super::*;
     use crate::git::ops::GitOps;
-    use crate::gitlab_api::{CreateMrReq, GitlabApi, NoteAuthor};
+    use crate::gitlab_api::{CreateMrReq, GitlabApi, Job, NoteAuthor};
     use async_trait::async_trait;
     use std::fs;
     use std::process::Command;
@@ -158,41 +203,151 @@ mod tests {
         ContextConfig::default()
     }
 
-    #[test]
-    fn extract_failures_filters_failed_pipelines() {
-        let pipelines = vec![
-            make_pipeline(1, "success"),
-            make_pipeline(2, "failed"),
-            make_pipeline(3, "running"),
-            make_pipeline(4, "failed"),
-        ];
-        let failures = extract_failures(&pipelines, &default_context_config());
-        assert_eq!(failures.len(), 2);
-        assert_eq!(failures[0].pipeline_id, 2);
-        assert_eq!(failures[1].pipeline_id, 4);
+    fn make_job(id: u64, name: &str, status: &str) -> Job {
+        Job {
+            id,
+            name: name.into(),
+            status: status.into(),
+            stage: "test".into(),
+            web_url: Some(format!("https://gl.test/jobs/{id}")),
+        }
     }
 
-    #[test]
-    fn extract_failures_caps_at_5() {
-        let pipelines: Vec<Pipeline> = (1..=10).map(|i| make_pipeline(i, "failed")).collect();
-        let failures = extract_failures(&pipelines, &default_context_config());
-        assert_eq!(failures.len(), 5);
+    #[tokio::test]
+    async fn extract_failures_with_logs_parses_compile_error() {
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert(
+            100,
+            vec![make_job(1, "build", "failed")],
+        );
+        let mut job_logs = std::collections::HashMap::new();
+        job_logs.insert(
+            1,
+            "error[E0277]: cannot find value `x` in this scope\n  --> src/main.rs:10:5\n".into(),
+        );
+        let mock = MockGitlab {
+            issue: Issue {
+                iid: 0,
+                title: String::new(),
+                description: None,
+                state: "opened".into(),
+                web_url: String::new(),
+            },
+            related_mrs: vec![],
+            issue_notes: vec![],
+            pipelines: vec![make_pipeline(100, "failed")],
+            jobs,
+            job_logs,
+        };
+        let failures =
+            extract_failures_with_logs(&mock, 1, &mock.pipelines, &default_context_config()).await;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].pipeline_id, 100);
+        assert_eq!(failures[0].job_name, "build");
+        assert_eq!(failures[0].failure_type, FailureType::Compile);
+        assert!(failures[0].root_cause.contains("cannot find value"));
     }
 
-    #[test]
-    fn extract_failures_sets_other_type_and_default_cause() {
-        let pipelines = vec![make_pipeline(1, "failed")];
-        let failures = extract_failures(&pipelines, &default_context_config());
+    #[tokio::test]
+    async fn extract_failures_with_logs_fallback_on_unrecognized_log() {
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert(100, vec![make_job(2, "test", "failed")]);
+        let mut job_logs = std::collections::HashMap::new();
+        job_logs.insert(2, "some random output\nno pattern here".into());
+        let mock = MockGitlab {
+            issue: Issue {
+                iid: 0,
+                title: String::new(),
+                description: None,
+                state: "opened".into(),
+                web_url: String::new(),
+            },
+            related_mrs: vec![],
+            issue_notes: vec![],
+            pipelines: vec![make_pipeline(100, "failed")],
+            jobs,
+            job_logs,
+        };
+        let failures =
+            extract_failures_with_logs(&mock, 1, &mock.pipelines, &default_context_config()).await;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].job_name, "test");
         assert_eq!(failures[0].failure_type, FailureType::Other);
-        assert_eq!(failures[0].root_cause, "pipeline failed");
-        assert_eq!(failures[0].job_name, "unknown");
+        assert!(failures[0].root_cause.contains("unrecognized log pattern"));
     }
 
-    #[test]
-    fn extract_failures_empty_when_no_failures() {
-        let pipelines = vec![make_pipeline(1, "success")];
-        let failures = extract_failures(&pipelines, &default_context_config());
+    #[tokio::test]
+    async fn extract_failures_with_logs_fallback_when_no_failed_jobs() {
+        // pipeline failed 但 jobs 为空 → fallback
+        let mock = MockGitlab {
+            issue: Issue {
+                iid: 0,
+                title: String::new(),
+                description: None,
+                state: "opened".into(),
+                web_url: String::new(),
+            },
+            related_mrs: vec![],
+            issue_notes: vec![],
+            pipelines: vec![make_pipeline(100, "failed")],
+            jobs: std::collections::HashMap::new(),
+            job_logs: std::collections::HashMap::new(),
+        };
+        let failures =
+            extract_failures_with_logs(&mock, 1, &mock.pipelines, &default_context_config()).await;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].job_name, "unknown");
+        assert_eq!(failures[0].failure_type, FailureType::Other);
+        assert!(failures[0].root_cause.contains("no failed jobs"));
+    }
+
+    #[tokio::test]
+    async fn extract_failures_with_logs_empty_when_no_failed_pipelines() {
+        let mock = MockGitlab {
+            issue: Issue {
+                iid: 0,
+                title: String::new(),
+                description: None,
+                state: "opened".into(),
+                web_url: String::new(),
+            },
+            related_mrs: vec![],
+            issue_notes: vec![],
+            pipelines: vec![make_pipeline(1, "success")],
+            jobs: std::collections::HashMap::new(),
+            job_logs: std::collections::HashMap::new(),
+        };
+        let failures =
+            extract_failures_with_logs(&mock, 1, &mock.pipelines, &default_context_config()).await;
         assert!(failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extract_failures_with_logs_caps_at_configured_limit() {
+        let mut jobs = std::collections::HashMap::new();
+        let mut job_logs = std::collections::HashMap::new();
+        for i in 1..=10 {
+            jobs.insert(i, vec![make_job(i, "build", "failed")]);
+            job_logs.insert(i, format!("error[E0277]: err {i}\n  --> src/main.rs:{i}:1\n"));
+        }
+        let mock = MockGitlab {
+            issue: Issue {
+                iid: 0,
+                title: String::new(),
+                description: None,
+                state: "opened".into(),
+                web_url: String::new(),
+            },
+            related_mrs: vec![],
+            issue_notes: vec![],
+            pipelines: (1..=10).map(|i| make_pipeline(i, "failed")).collect(),
+            jobs,
+            job_logs,
+        };
+        let failures =
+            extract_failures_with_logs(&mock, 1, &mock.pipelines, &default_context_config()).await;
+        // max_ci_history_failures 默认 5
+        assert_eq!(failures.len(), 5);
     }
 
     /// 手写 MockGitlab (避免 mockall async trait 复杂性)
@@ -201,6 +356,10 @@ mod tests {
         related_mrs: Vec<MergeRequest>,
         issue_notes: Vec<Note>,
         pipelines: Vec<Pipeline>,
+        /// 注入的 pipeline jobs (key = pipeline_id)
+        jobs: std::collections::HashMap<u64, Vec<Job>>,
+        /// 注入的 job 日志 (key = job_id)
+        job_logs: std::collections::HashMap<u64, String>,
     }
 
     #[async_trait]
@@ -294,11 +453,31 @@ mod tests {
                 draft: _draft,
             })
         }
-        async fn get_pipeline_jobs(&self, _project_id: u64, _pipeline_id: u64) -> Result<Vec<crate::gitlab_api::Job>> {
-            Ok(vec![])
+        async fn get_pipeline_jobs(&self, _project_id: u64, pipeline_id: u64) -> Result<Vec<crate::gitlab_api::Job>> {
+            Ok(self.jobs.get(&pipeline_id).cloned().unwrap_or_default())
         }
-        async fn get_job_log(&self, _project_id: u64, _job_id: u64) -> Result<String> {
+        async fn get_job_log(&self, _project_id: u64, job_id: u64) -> Result<String> {
+            Ok(self.job_logs.get(&job_id).cloned().unwrap_or_default())
+        }
+        async fn get_pipeline(&self, _project_id: u64, _pipeline_id: u64) -> Result<Pipeline> {
+            Ok(Pipeline {
+                id: 1,
+                status: "success".into(),
+                ref_: Some("main".into()),
+                sha: Some("abc".into()),
+                web_url: "https://gl.test/p/1".into(),
+            })
+        }
+        async fn get_file(&self, _project_id: u64, _file_path: &str, _ref_: &str) -> Result<String> {
             Ok(String::new())
+        }
+        async fn list_tree(
+            &self,
+            _project_id: u64,
+            _path: &str,
+            _ref_: &str,
+        ) -> Result<Vec<crate::gitlab_api::RepoTreeEntry>> {
+            Ok(vec![])
         }
     }
 
@@ -379,9 +558,11 @@ mod tests {
                 make_pipeline(100, "success"),
                 make_pipeline(101, "failed"),
             ],
+            jobs: std::collections::HashMap::new(),
+            job_logs: std::collections::HashMap::new(),
         };
 
-        let ctx = Context::build(&mock_gitlab, &ops, 1, 42, &crate::config::SummaryConfig::default(), &default_context_config()).await.unwrap();
+        let ctx = Context::build(&mock_gitlab, &ops, 1, 42, &crate::config::SummaryConfig::default(), &default_context_config(), &ProjectConfig::default()).await.unwrap();
 
         // Issue
         assert_eq!(ctx.issue.iid, 42);
@@ -394,9 +575,11 @@ mod tests {
         assert_eq!(ctx.issue_notes[0].body, "@devnpc 修复");
         // 最近提交
         assert!(!ctx.recent_commits.is_empty());
-        // CI 失败
+        // CI 失败 (pipeline 101 failed,无注入 job → fallback "no failed jobs")
         assert_eq!(ctx.ci_failures.len(), 1);
         assert_eq!(ctx.ci_failures[0].pipeline_id, 101);
+        assert_eq!(ctx.ci_failures[0].failure_type, FailureType::Other);
+        assert!(ctx.ci_failures[0].root_cause.contains("no failed jobs"));
         // Repo tree
         let tree_paths: Vec<&str> =
             ctx.repo_tree.entries.iter().map(|e| e.path.as_str()).collect();

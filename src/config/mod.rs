@@ -3,6 +3,8 @@
 pub mod devnpc_md;
 pub mod env;
 pub mod loader;
+pub mod npc_config;
+pub mod skill;
 
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +177,8 @@ pub struct Config {
     pub mcp: McpConfig,
     /// 长期记忆配置
     pub memory: MemoryConfig,
+    /// npc-config 角色与 SOP 配置
+    pub npc_config: NpcConfigSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -254,7 +258,7 @@ impl Default for ReportConfig {
     }
 }
 
-/// 模型路由配置 (P8)
+/// 模型路由配置
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelRoutingConfig {
     /// 简单任务使用的模型 (Fix, Test)
@@ -281,6 +285,24 @@ pub struct MemoryConfig {
     pub enabled: bool,
     /// SQLite 存储路径 (默认 ".devnpc-memory.db")
     pub db_path: String,
+}
+
+/// npc-config 角色与 SOP 配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct NpcConfigSection {
+    /// 是否启用 npc-config 加载 (默认 true)
+    pub enabled: bool,
+    /// npc-config 目录路径 (默认 "npc-config")
+    pub base_dir: String,
+}
+
+impl Default for NpcConfigSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_dir: "npc-config".to_string(),
+        }
+    }
 }
 
 impl Config {

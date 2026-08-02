@@ -13,10 +13,18 @@ path = "src/main.rs"
 name = "devnpc"
 path = "src/lib.rs"
 
+[features]
+default = ["deepseek", "openai", "anthropic", "gemini"]
+# 模型提供商 (通过 adk-rust 的同名 feature 启用)
+deepseek = ["adk-rust/deepseek"]
+openai = ["adk-rust/openai"]
+anthropic = ["adk-rust/anthropic"]
+gemini = ["adk-rust/gemini"]
+
 [dependencies]
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
-futures = "0.3"            # TODO: 阶段 C 移除,由 adk-rust 内部使用
+futures = "0.3"
 
 # Agent 框架 (adk-rust)
 adk-rust = { version = "1", features = [
@@ -24,7 +32,8 @@ adk-rust = { version = "1", features = [
     "openai", "anthropic", "deepseek",  # 其他模型提供商
     "tools",                      # FunctionTool 系统
     "graph",                      # 工作流编排
-    "mcp",                        # MCP 协议对接
+    "mcp",                        # MCP 协议对接 (stdio)
+    "mcp-http",                   # MCP HTTP/SSE 传输 (streamable HTTP client)
     "guardrail",                  # 安全护栏
     "memory",                     # 框架级会话记忆
     "rag",                        # 检索增强生成
@@ -36,7 +45,6 @@ adk-rust = { version = "1", features = [
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # 代码感知工具 (AFT)
-agent-file-tools = "0.49"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.23"
 tree-sitter-java = "0.23"
@@ -59,18 +67,15 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
-anyhow = "1"
 
 # 工具
-url = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
-dotenvy = "0.15"
-async-trait = "0.1"     # TODO: 阶段 C 移除,由 adk-rust 提供
+async-trait = "0.1"
 
 # 长期记忆存储
-rusqlite = "0.32"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # MCP 协议 (通过 adk-rust 的 mcp feature 使用)
 rmcp = "1"

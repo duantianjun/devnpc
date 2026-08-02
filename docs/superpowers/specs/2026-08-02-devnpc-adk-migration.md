@@ -1,6 +1,6 @@
 # devnpc adk-rust 框架迁移设计文档
 
-- **状态**: 待评审
+- **状态**: 已完成
 - **创建日期**: 2026-08-02
 - **基础设计**: [2026-08-01-devnpc-design.md](./2026-08-01-devnpc-design.md)
 - **迁移目标**: 将自研 ReAct Agent + 工具系统 + NPC/Team 编排替换为 adk-rust 框架
@@ -87,7 +87,7 @@ devnpc 当前自研的 Agent 框架（ReAct 循环、LLM 客户端、工具系�
 │ 基础设施层                                            │
 │  · tokio (异步运行时)                                 │
 │  · reqwest (GitLab API 客户端,保留)                   │
-│  · agent-file-tools (AFT 代码工具,保留)               │
+│  · tree-sitter (AST 代码解析,保留)                    │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -338,11 +338,10 @@ let evaluator = Evaluator::new()
 ### 4.1 Cargo.toml 变更
 
 **移除的依赖**:
-- `futures` (adk-rust 内部使用)
-- `async-trait` (adk-rust 内部使用)
-- `thiserror` (可用 adk-rust 错误类型或保留)
-- `anyhow` (可用 adk-rust 错误类型或保留)
-- `dotenvy` (Config 系统保留，但可改用 adk-rust 配置)
+- `agent-file-tools` (AFT 工具由自建 tree-sitter 封装替代)
+- `anyhow` (统一使用 thiserror 枚举错误)
+- `url` (reqwest 内部已包含,无需直接依赖)
+- `dotenvy` (Config 系统使用 std::env 直接读取)
 
 **保留的依赖**:
 - `tokio` (异步运行时，adk-rust 依赖)
@@ -350,8 +349,10 @@ let evaluator = Evaluator::new()
 - `serde` / `serde_json` / `serde_yaml` (序列化)
 - `clap` (CLI 参数解析)
 - `tracing` / `tracing-subscriber` (日志)
-- `agent-file-tools` / `tree-sitter` / `tree-sitter-rust` (AFT 工具)
-- `url` / `chrono` / `regex` (工具库)
+- `thiserror` (错误类型)
+- `tree-sitter` / `tree-sitter-rust` (AST 代码感知)
+- `chrono` / `regex` (工具库)
+- `async-trait` (异步 trait)
 - `tokio-test` / `mockall` / `tempfile` / `wiremock` (测试依赖)
 
 **新增的依赖**:
@@ -418,50 +419,50 @@ devnpc/
 
 ### 6.1 阶段 A: 基础设施准备
 
-- [ ] 升级 Cargo.toml: edition 2024 + 新增 adk-rust 依赖
-- [ ] 创建 `src/adapter/` 目录结构
-- [ ] 编译验证: `cargo build` 通过
+- [x] 升级 Cargo.toml: edition 2024 + 新增 adk-rust 依赖
+- [x] 创建 `src/adapter/` 目录结构
+- [x] 编译验证: `cargo build` 通过
 
 ### 6.2 阶段 B: 工具系统迁移
 
-- [ ] 在 `adapter/tools.rs` 中将现有工具包装为 FunctionTool
-- [ ] 保留 `src/tools/` 下各工具的实现逻辑
-- [ ] 移除 `src/tools/mod.rs` 自建 Tool trait + ToolRegistry
-- [ ] 测试验证: 所有工具独立调用正常
+- [x] 在 `adapter/tools.rs` 中将现有工具包装为 FunctionTool
+- [x] 保留 `src/tools/` 下各工具的实现逻辑
+- [x] 移除 `src/tools/mod.rs` 自建 Tool trait + ToolRegistry
+- [x] 测试验证: 所有工具独立调用正常
 
 ### 6.3 阶段 C: 核心执行流迁移
 
-- [ ] 实现 `adapter/provider.rs` 多模型提供商
-- [ ] 实现 `adapter/callbacks.rs` SOP 检测 + 轨迹记录
-- [ ] 实现 `adapter/context.rs` 业务上下文注入 Session
-- [ ] 修改 `src/main.rs` 使用 Runner + LlmAgent
-- [ ] 删除 `src/agent/` 目录
-- [ ] 测试验证: 单 Agent 执行闭环通过
+- [x] 实现 `adapter/provider.rs` 多模型提供商
+- [x] 实现 `adapter/callbacks.rs` SOP 检测 + 轨迹记录
+- [x] 实现 `adapter/context.rs` 业务上下文注入 Session
+- [x] 修改 `src/main.rs` 使用 Runner + LlmAgent
+- [x] 删除 `src/agent/` 目录
+- [x] 测试验证: 单 Agent 执行闭环通过
 
 ### 6.4 阶段 D: 多 NPC 编排迁移
 
-- [ ] 使用 adk-rust graph 模块替代 `src/team/`
-- [ ] 删除 `src/team/` 目录
-- [ ] 删除 `src/npc/` 目录
-- [ ] 测试验证: 多 NPC 协作流程通过
+- [x] 使用 adk-rust graph 模块替代 `src/team/`
+- [x] 删除 `src/team/` 目录
+- [x] 删除 `src/npc/` 目录
+- [x] 测试验证: 多 NPC 协作流程通过
 
 ### 6.5 阶段 E: 功能模块集成
 
-- [ ] 集成 guardrail (安全过滤)
-- [ ] 集成 memory (会话记忆)
-- [ ] 集成 code-exec (代码沙箱)
-- [ ] 集成 mcp (MCP Server 对接)
-- [ ] 集成 rag (检索增强)
-- [ ] 集成 eval (评测)
-- [ ] 集成 session (状态持久化)
+- [x] 集成 guardrail (安全过滤)
+- [x] 集成 memory (会话记忆)
+- [x] 集成 code-exec (代码沙箱)
+- [x] 集成 mcp (MCP Server 对接)
+- [x] 集成 rag (检索增强)
+- [x] 集成 eval (评测)
+- [x] 集成 session (状态持久化)
 
 ### 6.6 阶段 F: 集成测试
 
-- [ ] 更新 CI 适配层接口
-- [ ] 更新 report 轨迹采集
-- [ ] 更新测试用例
-- [ ] 端到端冒烟测试通过
-- [ ] `cargo clippy -D warnings` 通过
+- [x] 更新 CI 适配层接口
+- [x] 更新 report 轨迹采集
+- [x] 更新测试用例
+- [x] 端到端冒烟测试通过
+- [x] `cargo clippy -D warnings` 通过
 
 ## 7. 风险与应对
 
@@ -470,6 +471,6 @@ devnpc/
 | adk-rust API 不稳定 | 锁定 v1.0.0 版本，adapter 层隔离变化 |
 | Rust edition 2024 兼容性问题 | 先在分支测试编译，逐步修复 |
 | FunctionTool 参数序列化差异 | 统一使用 serde，测试覆盖所有工具 |
-| 原有 165 个测试用例需要适配 | 保留业务逻辑测试，替换框架相关测试 |
+| 原有 165 个测试用例需要适配 | 保留业务逻辑测试，替换框架相关测试 (当前 311 个测试全部通过) |
 | CI 环境需要 adk-rust 编译通过 | 提前验证 Dockerfile 构建 |
 | edition 2024 与 tree-sitter 等依赖兼容性 | 升级 tree-sitter 等依赖到兼容版本 |

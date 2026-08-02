@@ -1,4 +1,4 @@
-//! HTML 报告生成 (P4 完整实现)
+//! HTML 报告生成
 //!
 //! 基于 ReportData 生成带有完整 overview / task / trajectory / cost / output 的 HTML 报告。
 

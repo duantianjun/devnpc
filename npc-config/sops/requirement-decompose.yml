@@ -1,0 +1,15 @@
+name: requirement-decompose
+description: 需求分析与任务分解流程 (PM 角色)
+steps:
+  - name: 需求理解
+    expected_tools: [finish]
+    hint: "阅读需求描述,明确目标、范围和验收标准"
+  - name: 任务拆分
+    expected_tools: [finish]
+    hint: "将需求拆分为独立的开发任务和测试任务,每个任务应可独立交付"
+  - name: 优先级与依赖
+    expected_tools: [finish]
+    hint: "定义任务优先级 (P0/P1/P2) 和依赖关系,标注阻塞项"
+  - name: 交付
+    expected_tools: [finish]
+    hint: "summary 写入任务分解方案,包含任务列表、优先级和依赖图"

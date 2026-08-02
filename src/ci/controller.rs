@@ -1,4 +1,4 @@
-//! CI 闭环控制器 (P4 完整实现)
+//! CI 闭环控制器
 //!
 //! 流程: 等待 Pipeline → 轮询状态 → 成功(标记 MR ready) / 失败(触发修复,重试)
 
@@ -27,7 +27,7 @@ pub trait FixHandler: Send + Sync {
     async fn run_fix(&self, failures: &[ParsedFailure], instruction: &str) -> Result<String>;
 }
 
-/// CI 闭环控制器 (P4 实现)
+/// CI 闭环控制器
 pub struct CiController {
     config: CiConfig,
     gitlab: Box<dyn GitlabApi>,
@@ -546,6 +546,36 @@ mod tests {
                 .map(|(_, log)| log.clone())
                 .unwrap_or_default())
         }
+        async fn get_pipeline(&self, _p: u64, _pi: u64) -> Result<Pipeline> {
+            Ok(self
+                .pipelines
+                .first()
+                .map(|(id, status, ref_)| Pipeline {
+                    id: *id,
+                    status: status.clone(),
+                    ref_: Some(ref_.clone()),
+                    sha: Some("abc123".into()),
+                    web_url: format!("https://gl.test/pipelines/{id}"),
+                })
+                .unwrap_or_else(|| Pipeline {
+                    id: 1,
+                    status: "success".into(),
+                    ref_: Some("main".into()),
+                    sha: Some("abc".into()),
+                    web_url: "https://gl.test/pipelines/1".into(),
+                }))
+        }
+        async fn get_file(&self, _p: u64, _fp: &str, _r: &str) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn list_tree(
+            &self,
+            _p: u64,
+            _path: &str,
+            _ref_: &str,
+        ) -> Result<Vec<crate::gitlab_api::RepoTreeEntry>> {
+            Ok(vec![])
+        }
     }
 
     /// Mock FixHandler 模拟修复
@@ -775,6 +805,26 @@ mod tests {
             }
             async fn get_job_log(&self, _p: u64, _j: u64) -> Result<String> {
                 Ok(String::new())
+            }
+            async fn get_pipeline(&self, _p: u64, _pi: u64) -> Result<Pipeline> {
+                Ok(Pipeline {
+                    id: 1,
+                    status: "success".into(),
+                    ref_: Some("main".into()),
+                    sha: Some("abc".into()),
+                    web_url: "https://gl.test/p/1".into(),
+                })
+            }
+            async fn get_file(&self, _p: u64, _fp: &str, _r: &str) -> Result<String> {
+                Ok(String::new())
+            }
+            async fn list_tree(
+                &self,
+                _p: u64,
+                _path: &str,
+                _ref_: &str,
+            ) -> Result<Vec<crate::gitlab_api::RepoTreeEntry>> {
+                Ok(vec![])
             }
         }
 

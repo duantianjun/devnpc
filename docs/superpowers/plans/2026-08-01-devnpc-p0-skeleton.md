@@ -1,6 +1,6 @@
 # devnpc P0 骨架 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 搭建 devnpc 项目骨架,所有依赖编译通过,所有模块文件就位,`cargo build` 与 `cargo test` 成功,为 P1 起步奠定基础。
 
@@ -76,7 +76,7 @@ P0 创建以下文件,每个文件单一职责:
 - Create: `src/main.rs`
 - Create: `src/lib.rs`
 
-- [ ] **Step 1: 初始化 git 仓库与 Cargo 项目**
+- [x] **Step 1: 初始化 git 仓库与 Cargo 项目**
 
 在项目根目录 `c:\Users\Administrator\Documents\devnpc` 执行:
 
@@ -93,7 +93,7 @@ cargo build
 
 Expected: 编译成功,产生 `target/debug/devnpc.exe`。
 
-- [ ] **Step 2: 创建 lib.rs**
+- [x] **Step 2: 创建 lib.rs**
 
 Rust 默认 `cargo init` 只创建 bin。手动创建 lib 入口:
 
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 3: 创建 error.rs 占位**
+- [x] **Step 3: 创建 error.rs 占位**
 
 Create `src/error.rs`:
 
@@ -134,7 +134,7 @@ pub enum DevnpcError {
 pub type Result<T> = std::result::Result<T, DevnpcError>;
 ```
 
-- [ ] **Step 4: 验证编译并提交**
+- [x] **Step 4: 验证编译并提交**
 
 ```bash
 cargo build
@@ -154,7 +154,7 @@ git commit -m "feat: 初始化 devnpc 项目骨架"
 **Files:**
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: 写入完整 Cargo.toml**
+- [x] **Step 1: 写入完整 Cargo.toml**
 
 Replace `Cargo.toml` 内容为:
 
@@ -219,7 +219,7 @@ mockall = "0.13"
 tempfile = "3"
 ```
 
-- [ ] **Step 2: 验证依赖编译**
+- [x] **Step 2: 验证依赖编译**
 
 ```bash
 cargo build
@@ -229,7 +229,7 @@ Expected: 下载所有依赖并编译成功。首次编译较慢 (5-15 分钟,�
 
 **注意**: 如果 `rig-core`、`agent-file-tools` 版本号与 crates.io 实际不符,编译会报错。此时用 `cargo search rig-core` 和 `cargo search agent-file-tools` 查实际最新版本,更新 Cargo.toml 后重试。若 `agent-file-tools` crate 不存在或 API 差异大,临时注释掉该依赖与 `tree-sitter`,在 P3 实现工具层时再解决 (P0 目标是骨架编译通过)。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add Cargo.toml Cargo.lock
@@ -244,7 +244,7 @@ git commit -m "feat: 配置完整依赖清单"
 - Modify: `src/error.rs`
 - Test: `src/error.rs` (内联 #[cfg(test)])
 
-- [ ] **Step 1: 写失败测试 - 错误显示**
+- [x] **Step 1: 写失败测试 - 错误显示**
 
 Replace `src/error.rs` with:
 
@@ -339,7 +339,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证通过**
+- [x] **Step 2: 运行测试验证通过**
 
 ```bash
 cargo test --lib error
@@ -347,7 +347,7 @@ cargo test --lib error
 
 Expected: 5 个测试全部 PASS。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/error.rs
@@ -364,7 +364,7 @@ git commit -m "feat: 定义统一错误类型 DevnpcError"
 - Create: `src/config/loader.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 config 模块文件**
+- [x] **Step 1: 创建 config 模块文件**
 
 Create `src/config/mod.rs`:
 
@@ -507,7 +507,7 @@ Create `src/config/loader.rs`:
 // - Config::merge()
 ```
 
-- [ ] **Step 2: 更新 lib.rs 导出 config 模块**
+- [x] **Step 2: 更新 lib.rs 导出 config 模块**
 
 Replace `src/lib.rs`:
 
@@ -518,7 +518,7 @@ pub mod config;
 pub mod error;
 ```
 
-- [ ] **Step 3: 验证编译**
+- [x] **Step 3: 验证编译**
 
 ```bash
 cargo build
@@ -526,7 +526,7 @@ cargo build
 
 Expected: 编译成功。可能有未使用代码警告 (正常,P0 是骨架)。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/config/ src/lib.rs
@@ -547,7 +547,7 @@ git commit -m "feat: 配置模块骨架 (Config/LlmConfig/GitlabConfig/ProjectCo
 - Create: `src/gitlab_api/repo.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 gitlab_api/mod.rs 含数据模型与 trait**
+- [x] **Step 1: 创建 gitlab_api/mod.rs 含数据模型与 trait**
 
 Create `src/gitlab_api/mod.rs`:
 
@@ -635,7 +635,7 @@ pub struct NoteAuthor {
 }
 ```
 
-- [ ] **Step 2: 创建 client.rs (reqwest 封装,P1 完整实现)**
+- [x] **Step 2: 创建 client.rs (reqwest 封装,P1 完整实现)**
 
 Create `src/gitlab_api/client.rs`:
 
@@ -701,7 +701,7 @@ impl GitlabApi for GitlabClient {
 }
 ```
 
-- [ ] **Step 3: 创建其余 gitlab_api 子模块 (占位)**
+- [x] **Step 3: 创建其余 gitlab_api 子模块 (占位)**
 
 Create `src/gitlab_api/issues.rs`:
 
@@ -733,7 +733,7 @@ Create `src/gitlab_api/repo.rs`:
 //! 仓库元数据/文件 (P1 实现: get_file, list_tree)
 ```
 
-- [ ] **Step 4: 更新 lib.rs 并验证编译**
+- [x] **Step 4: 更新 lib.rs 并验证编译**
 
 Replace `src/lib.rs`:
 
@@ -751,7 +751,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/gitlab_api/ src/lib.rs
@@ -767,7 +767,7 @@ git commit -m "feat: GitLab API 模块骨架 (GitlabApi trait + 数据模型)"
 - Create: `src/git/ops.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 git 模块**
+- [x] **Step 1: 创建 git 模块**
 
 Create `src/git/mod.rs`:
 
@@ -828,7 +828,7 @@ impl GitOps {
 }
 ```
 
-- [ ] **Step 2: 更新 lib.rs 并验证编译**
+- [x] **Step 2: 更新 lib.rs 并验证编译**
 
 Replace `src/lib.rs`:
 
@@ -847,7 +847,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/git/ src/lib.rs
@@ -864,7 +864,7 @@ git commit -m "feat: Git 操作模块骨架 (GitOps)"
 - Create: `src/memory/repo_index.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 memory 模块**
+- [x] **Step 1: 创建 memory 模块**
 
 Create `src/memory/mod.rs`:
 
@@ -974,7 +974,7 @@ pub fn select_key_files(_tree: &RepoTree) -> Vec<KeyFile> {
 }
 ```
 
-- [ ] **Step 2: 更新 lib.rs 并验证编译**
+- [x] **Step 2: 更新 lib.rs 并验证编译**
 
 Replace `src/lib.rs`:
 
@@ -994,7 +994,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/memory/ src/lib.rs
@@ -1013,7 +1013,7 @@ git commit -m "feat: 记忆模块骨架 (Context/RepoTree/CiFailure)"
 - Create: `src/agent/sop.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 agent/mod.rs**
+- [x] **Step 1: 创建 agent/mod.rs**
 
 Create `src/agent/mod.rs`:
 
@@ -1026,7 +1026,7 @@ pub mod prompt;
 pub mod sop;
 ```
 
-- [ ] **Step 2: 创建 loop_.rs (ReAct 循环骨架)**
+- [x] **Step 2: 创建 loop_.rs (ReAct 循环骨架)**
 
 Create `src/agent/loop_.rs`:
 
@@ -1079,7 +1079,7 @@ impl ReactLoop {
 }
 ```
 
-- [ ] **Step 3: 创建 prompt.rs**
+- [x] **Step 3: 创建 prompt.rs**
 
 Create `src/agent/prompt.rs`:
 
@@ -1092,7 +1092,7 @@ pub fn build_initial_messages() -> Vec<String> {
 }
 ```
 
-- [ ] **Step 4: 创建 llm_client.rs**
+- [x] **Step 4: 创建 llm_client.rs**
 
 Create `src/agent/llm_client.rs`:
 
@@ -1120,7 +1120,7 @@ impl LlmClient {
 }
 ```
 
-- [ ] **Step 5: 创建 sop.rs**
+- [x] **Step 5: 创建 sop.rs**
 
 Create `src/agent/sop.rs`:
 
@@ -1177,7 +1177,7 @@ impl Sop {
 }
 ```
 
-- [ ] **Step 6: 更新 lib.rs 并验证编译**
+- [x] **Step 6: 更新 lib.rs 并验证编译**
 
 Replace `src/lib.rs`:
 
@@ -1198,7 +1198,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/agent/ src/lib.rs
@@ -1217,7 +1217,7 @@ git commit -m "feat: Agent 模块骨架 (ReactLoop/Sop/Trajectory)"
 - Create: `src/tools/gitlab_tool.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 tools/mod.rs 含 Tool trait**
+- [x] **Step 1: 创建 tools/mod.rs 含 Tool trait**
 
 Create `src/tools/mod.rs`:
 
@@ -1284,7 +1284,7 @@ impl Default for ToolRegistry {
 }
 ```
 
-- [ ] **Step 2: 创建工具子模块 (占位)**
+- [x] **Step 2: 创建工具子模块 (占位)**
 
 Create `src/tools/file_io.rs`:
 
@@ -1380,7 +1380,7 @@ impl GitlabTool {
 }
 ```
 
-- [ ] **Step 3: 写路径检查测试**
+- [x] **Step 3: 写路径检查测试**
 
 在 `src/tools/file_io.rs` 末尾追加:
 
@@ -1412,7 +1412,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: 更新 lib.rs 并验证**
+- [x] **Step 4: 更新 lib.rs 并验证**
 
 Replace `src/lib.rs`:
 
@@ -1435,7 +1435,7 @@ cargo test --lib tools
 
 Expected: 编译成功,2 个路径检查测试 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/tools/ src/lib.rs
@@ -1452,7 +1452,7 @@ git commit -m "feat: 工具模块骨架 (Tool trait/ToolRegistry/FileIo 路径�
 - Create: `src/ci/log_parser.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 ci/mod.rs**
+- [x] **Step 1: 创建 ci/mod.rs**
 
 Create `src/ci/mod.rs`:
 
@@ -1463,7 +1463,7 @@ pub mod controller;
 pub mod log_parser;
 ```
 
-- [ ] **Step 2: 创建 controller.rs**
+- [x] **Step 2: 创建 controller.rs**
 
 Create `src/ci/controller.rs`:
 
@@ -1520,7 +1520,7 @@ impl CiController {
 }
 ```
 
-- [ ] **Step 3: 创建 log_parser.rs (含可工作测试)**
+- [x] **Step 3: 创建 log_parser.rs (含可工作测试)**
 
 Create `src/ci/log_parser.rs`:
 
@@ -1692,7 +1692,7 @@ error[E0277]: cannot find value `password_raw` in this scope
 }
 ```
 
-- [ ] **Step 4: 更新 lib.rs 并验证**
+- [x] **Step 4: 更新 lib.rs 并验证**
 
 Replace `src/lib.rs`:
 
@@ -1716,7 +1716,7 @@ cargo test --lib ci
 
 Expected: 编译成功,5 个日志解析测试 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/ci/ src/lib.rs
@@ -1734,7 +1734,7 @@ git commit -m "feat: CI 模块骨架 + 日志解析器 (Rust 编译/测试/超�
 - Create: `src/npc/runner.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 npc/mod.rs**
+- [x] **Step 1: 创建 npc/mod.rs**
 
 Create `src/npc/mod.rs`:
 
@@ -1746,7 +1746,7 @@ pub mod runner;
 pub mod sop;
 ```
 
-- [ ] **Step 2: 创建 role.rs**
+- [x] **Step 2: 创建 role.rs**
 
 Create `src/npc/role.rs`:
 
@@ -1772,7 +1772,7 @@ fn default_max_iterations() -> u32 {
 }
 ```
 
-- [ ] **Step 3: 创建 sop.rs (NPC 侧 SOP 定义,引用 agent::sop)**
+- [x] **Step 3: 创建 sop.rs (NPC 侧 SOP 定义,引用 agent::sop)**
 
 Create `src/npc/sop.rs`:
 
@@ -1784,7 +1784,7 @@ Create `src/npc/sop.rs`:
 pub use crate::agent::sop::{Sop, SopStep};
 ```
 
-- [ ] **Step 4: 创建 runner.rs**
+- [x] **Step 4: 创建 runner.rs**
 
 Create `src/npc/runner.rs`:
 
@@ -1812,7 +1812,7 @@ impl NpcRunner {
 }
 ```
 
-- [ ] **Step 5: 更新 lib.rs 并验证**
+- [x] **Step 5: 更新 lib.rs 并验证**
 
 Replace `src/lib.rs`:
 
@@ -1836,7 +1836,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/npc/ src/lib.rs
@@ -1853,7 +1853,7 @@ git commit -m "feat: NPC 模块骨架 (Role/NpcRunner)"
 - Create: `src/team/comm.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 team 模块**
+- [x] **Step 1: 创建 team 模块**
 
 Create `src/team/mod.rs`:
 
@@ -1917,7 +1917,7 @@ pub struct Handoff {
 }
 ```
 
-- [ ] **Step 2: 更新 lib.rs 并验证**
+- [x] **Step 2: 更新 lib.rs 并验证**
 
 Replace `src/lib.rs`:
 
@@ -1942,7 +1942,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/team/ src/lib.rs
@@ -1958,7 +1958,7 @@ git commit -m "feat: Team 模块骨架 (Orchestrator/Handoff)"
 - Create: `src/trigger/parser.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 trigger 模块**
+- [x] **Step 1: 创建 trigger 模块**
 
 Create `src/trigger/mod.rs`:
 
@@ -2015,7 +2015,7 @@ pub fn classify_task(_text: &str) -> TaskKind {
 }
 ```
 
-- [ ] **Step 2: 更新 lib.rs 并验证**
+- [x] **Step 2: 更新 lib.rs 并验证**
 
 Replace `src/lib.rs`:
 
@@ -2041,7 +2041,7 @@ cargo build
 
 Expected: 编译成功。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/trigger/ src/lib.rs
@@ -2059,7 +2059,7 @@ git commit -m "feat: Trigger 模块骨架 (Trigger/TaskSpec/TaskKind)"
 - Create: `src/report/publisher.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: 创建 report/mod.rs**
+- [x] **Step 1: 创建 report/mod.rs**
 
 Create `src/report/mod.rs`:
 
@@ -2071,7 +2071,7 @@ pub mod html;
 pub mod publisher;
 ```
 
-- [ ] **Step 2: 创建 collector.rs**
+- [x] **Step 2: 创建 collector.rs**
 
 Create `src/report/collector.rs`:
 
@@ -2110,7 +2110,7 @@ impl Default for TrajectoryCollector {
 }
 ```
 
-- [ ] **Step 3: 创建 html.rs (含 askama 模板)**
+- [x] **Step 3: 创建 html.rs (含 askama 模板)**
 
 Create `src/report/html.rs`:
 
@@ -2191,7 +2191,7 @@ mod tests {
 
 注: P0 用 `format!` 简化生成,P4 再改用 askama 模板文件 `templates/report.html.askama`。
 
-- [ ] **Step 4: 创建 publisher.rs**
+- [x] **Step 4: 创建 publisher.rs**
 
 Create `src/report/publisher.rs`:
 
@@ -2207,7 +2207,7 @@ pub async fn publish(_html: &str, _target: &ReportTarget) -> Result<String> {
 }
 ```
 
-- [ ] **Step 5: 更新 lib.rs 并验证**
+- [x] **Step 5: 更新 lib.rs 并验证**
 
 Replace `src/lib.rs`:
 
@@ -2235,7 +2235,7 @@ cargo test --lib report
 
 Expected: 编译成功,HTML 生成测试 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/report/ src/lib.rs
@@ -2249,7 +2249,7 @@ git commit -m "feat: Report 模块骨架 (TrajectoryCollector/ReportData/HTML �
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: 写 CLI 骨架**
+- [x] **Step 1: 写 CLI 骨架**
 
 Replace `src/main.rs`:
 
@@ -2334,7 +2334,7 @@ fn print_info() {
 }
 ```
 
-- [ ] **Step 2: 验证编译与运行**
+- [x] **Step 2: 验证编译与运行**
 
 ```bash
 cargo build
@@ -2354,7 +2354,7 @@ cargo run -- run --dry-run
 
 Expected: 打印 "dry_run 模式: 不执行实际任务"。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/main.rs
@@ -2368,7 +2368,7 @@ git commit -m "feat: CLI 入口 (clap) - run/config/info 子命令"
 **Files:**
 - Create: `.gitignore`
 
-- [ ] **Step 1: 创建 .gitignore**
+- [x] **Step 1: 创建 .gitignore**
 
 Create `.gitignore`:
 
@@ -2380,7 +2380,7 @@ Create `.gitignore`:
 .devnpc-report/
 ```
 
-- [ ] **Step 2: 全量编译与测试**
+- [x] **Step 2: 全量编译与测试**
 
 ```bash
 cargo build
@@ -2393,7 +2393,7 @@ Expected:
 - `cargo test`: 所有测试 PASS (error: 5, tools: 2, ci: 5, report: 1 = 共 13 个测试)
 - `cargo build --release`: 成功
 
-- [ ] **Step 3: 运行 clippy (可选但推荐)**
+- [x] **Step 3: 运行 clippy (可选但推荐)**
 
 ```bash
 cargo clippy -- -D warnings
@@ -2401,24 +2401,24 @@ cargo clippy -- -D warnings
 
 Expected: 无 warning (或有少量 dead_code warning,P0 骨架阶段可接受)。
 
-- [ ] **Step 4: 提交 .gitignore 与最终验证**
+- [x] **Step 4: 提交 .gitignore 与最终验证**
 
 ```bash
 git add .gitignore
 git commit -m "chore: 添加 .gitignore"
 ```
 
-- [ ] **Step 5: P0 验收检查**
+- [x] **Step 5: P0 验收检查**
 
 逐项确认:
 
-- [ ] `cargo build` 成功
-- [ ] `cargo test` 全部 PASS
-- [ ] `cargo run -- info` 正常输出
-- [ ] `cargo run -- run --dry-run` 正常输出
-- [ ] 所有 12 个模块文件就位 (config/gitlab_api/git/memory/agent/tools/ci/npc/team/trigger/report/error)
-- [ ] `src/lib.rs` 导出所有模块
-- [ ] git 历史清晰 (16 个提交,每个 Task 一个)
+- [x] `cargo build` 成功
+- [x] `cargo test` 全部 PASS
+- [x] `cargo run -- info` 正常输出
+- [x] `cargo run -- run --dry-run` 正常输出
+- [x] 所有 12 个模块文件就位 (config/gitlab_api/git/memory/agent/tools/ci/npc/team/trigger/report/error)
+- [x] `src/lib.rs` 导出所有模块
+- [x] git 历史清晰 (16 个提交,每个 Task 一个)
 
 ---
 

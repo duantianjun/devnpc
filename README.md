@@ -13,12 +13,12 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 | Agent 框架 | adk-rust (zavora-ai) | LlmAgent + FunctionTool + Runner + 工作流编排 |
 | 模型提供商 | deepseek / openai / anthropic / gemini | 多模型路由,按任务类型选择 |
 | GitLab API | reqwest + 自建 client | REST API v4 |
-| 代码工具 | agent-file-tools + tree-sitter | AST 级代码感知,省 token |
+| 代码工具 | tree-sitter | AST 级代码感知,省 token |
 | CLI | clap (derive) | `devnpc run / config / info` |
 | 序列化 | serde + serde_json + serde_yaml | 配置 + 消息 + 工具参数 |
 | 报告 | 自建 HTML 模板引擎 | 运行轨迹 + 成本估算 |
 | 日志 | tracing + tracing-subscriber | 结构化日志 |
-| 错误 | thiserror + anyhow | 库层枚举 + CLI 层透明 |
+| 错误 | thiserror | 库层枚举错误类型 |
 
 ## 架构
 
@@ -34,10 +34,13 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 │  │  context.rs   ← 业务上下文 → Session 注入                 │
 │  │  provider.rs  ← 多模型提供商配置                          │
 │  │  file_io.rs   ← 带路径安全检查的文件 I/O                   │
+│  │  agents.rs    ← 子 Agent 构建 (Role+SOP+Skill 三层注入)   │
+│  │  orchestrator ← 任务编排 + Team 协作流程                  │
 │  ci       ← Pipeline 失败 → 日志解析 → 修复闭环              │
 │  report   ← 轨迹采集 + HTML 生成 + 发布                      │
 ├─────────────────────────────────────────────────────────────┤
 │  config   ← env > .devnpc.md > 默认值  (三层合并)            │
+│  │  npc_config  ← Role + SOP + Skill + Team (YAML 配置)     │
 │  gitlab_api ← REST v4 客户端                                 │
 │  git      ← GitOps (系统 git 命令封装)                       │
 └─────────────────────────────────────────────────────────────┘
@@ -45,6 +48,8 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 
 **核心设计决策**:
 - **adk-rust 框架**:基于 zavora-ai/adk-rust 的 LlmAgent + FunctionTool + Runner,替代自研 ReAct 循环
+- **三层能力注入**:Role(身份+工具白名单) + SOP(流程步骤) + Skill(领域专家知识),通过 YAML 声明式配置
+- **Team 编排**:多 Agent 协作流程(PM→Developer→Tester),基于 handoff 规则和信号传递串联
 - **SOP 双层约束**:通过 `before_tool_callback` 实现 soft 模式(偏离只警告) + strict 模式(偏离即阻断)
 - **唯一副作用出口**:所有写操作走 FunctionTool 包装层,便于审计与沙箱化
 - **研发记忆**:任务执行前聚合 Git 仓库树 + 关键文件摘要 + Issue/PR/CI 历史,降低 LLM 上下文成本
@@ -54,8 +59,8 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 
 | 模块 | 职责 |
 |------|------|
-| [src/config/](src/config/) | 三层配置合并(env > .devnpc.md > 默认) |
-| [src/gitlab_api/](src/gitlab_api/) | GitLab REST v4 客户端(9 个 API 方法) |
+| [src/config/](src/config/) | 三层配置合并(env > .devnpc.md > 默认) + npc_config(Role/SOP/Skill/Team) |
+| [src/gitlab_api/](src/gitlab_api/) | GitLab REST v4 客户端(16 个 trait 方法 + 资源级 helper) |
 | [src/git/](src/git/) | GitOps 同步封装(`std::process::Command`) |
 | [src/memory/](src/memory/) | 研发记忆聚合(Context + repo_index) |
 | [src/adapter/](src/adapter/) | adk-rust 框架适配层(工具、回调、上下文、提供商) |
@@ -73,7 +78,8 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 | **CI 闭环** | 自动创建 Draft MR → 轮询 Pipeline → 失败时解析日志 → 修复重试 |
 | **多触发方式** | MR/Issue 评论 `@devnpc` 触发,或命令行手动触发 |
 | **多模型路由** | 支持 DeepSeek/OpenAI/Anthropic/Gemini,简单/复杂任务可用不同模型 |
-| **9 种语言支持** | Rust、Java、Python、JavaScript、TypeScript、Go、C、C++ 的 AST 级代码感知 |
+| **NPC 配置系统** | Role(身份) + SOP(流程) + Skill(领域知识) + Team(协作),YAML 声明式配置 |
+| **9 种语言支持** | Rust、Java、Python、JavaScript、TypeScript、Tsx、Go、C、C++ 的 AST 级代码感知 |
 
 ### 工具列表
 
@@ -94,13 +100,26 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 
 ### GitLab API 能力
 
-| API | 功能 |
-|-----|------|
-| 获取 Issue/MR 详情 | 读取 Issue 和 MR 的标题、描述、状态 |
-| 创建/更新 MR | 创建 Draft MR,移除 Draft 状态 |
-| 获取 Pipeline 与 Job | 查询 Pipeline 状态、Job 列表、Job 原始日志 |
-| 评论管理 | 读取 Issue/MR 评论,发表评论 |
-| 关联查询 | 获取 Issue 关联的 MR、最近 Pipeline |
+trait `GitlabApi` 共 16 个方法,分为 CRUD 与资源级 helper 两层:
+
+| 分类 | API | 功能 |
+|------|-----|------|
+| Issue | `get_issue` / `get_issue_notes` / `create_issue_note` | 读取 Issue 详情、评论列表,发表评论 |
+| MR | `get_mr` / `create_mr` / `update_mr` / `get_mr_notes` / `create_mr_note` | 读取/创建/更新 MR,评论管理 |
+| 关联 | `get_related_mrs` | 获取 Issue 关联的 MR 列表 |
+| Pipeline | `get_pipelines` / `get_recent_pipelines` / `get_pipeline` | 查询 Pipeline 列表与单条详情 |
+| Job | `get_pipeline_jobs` / `get_job_log` | 查询 Job 列表与原始日志 |
+| 仓库 | `get_file` / `list_tree` | 读取仓库文件内容与目录树 |
+
+资源级 helper(纯函数 + 并行聚合,在 `gitlab_api/{issues,mrs,notes,pipelines,repo}.rs`):
+
+| helper | 功能 |
+|--------|------|
+| `issues::fetch_issue_context` | 并行拉取 Issue + 关联 MR + 评论 |
+| `mrs::fetch_mr_context` / `find_latest_open_mr` / `is_mergeable` | MR 上下文聚合与状态判断 |
+| `notes::filter_by_author` / `extract_mentions` / `contains_command` | 评论过滤、@提及提取、指令检测 |
+| `pipelines::fetch_job_logs` / `filter_failed` / `is_terminal` | 批量日志拉取、失败过滤、终态判断 |
+| `repo::read_file` / `list_root_tree` / `filter_files` / `read_files` | 仓库文件读写与目录过滤 |
 
 ### 智能上下文(研发记忆)
 
@@ -114,8 +133,160 @@ Agent 执行前自动聚合以下信息,降低 LLM 上下文成本:
 | 关联 MR | GitLab API |
 | 评论历史 | GitLab API |
 | 最近提交记录 | `git log` |
-| CI 失败历史 | 最近 Pipeline 失败记录 |
+| CI 失败历史 | 最近 failed Pipeline 的 job 日志解析根因(job_name / failure_type / root_cause) |
 | 项目规范 | `.devnpc.md` 配置 |
+
+### NPC 配置系统(Role + SOP + Skill + Team)
+
+devnpc 通过 `npc-config/` 目录下的 YAML 文件声明式配置 Agent 的能力,实现"身份 + 流程 + 知识 + 协作"四层抽象:
+
+```
+npc-config/
+├── roles/         # 角色: 身份 + 工具白名单
+│   ├── developer.yml
+│   ├── pm.yml
+│   └── tester.yml
+├── sops/          # SOP: 流程步骤
+│   ├── bugfix.yml
+│   ├── feature.yml
+│   ├── requirement-decompose.yml
+│   └── test-gen.yml
+├── skills/        # Skill: 领域专家知识
+│   ├── backend.yml
+│   ├── database.yml
+│   ├── frontend.yml
+│   └── security.yml
+└── teams/         # Team: 多角色协作流程
+    └── feature-team.yml
+```
+
+#### Role(角色)
+
+定义 Agent 身份和工具白名单,控制"谁能做什么":
+
+```yaml
+# npc-config/roles/developer.yml
+name: developer
+description: 全栈开发工程师
+system_prompt: |
+  你是全栈工程师,遵循最小改动原则。
+  修改前先理解上下文,改完后验证编译。
+max_iterations: 25
+default_sop: bugfix
+tools:
+  - view_symbol
+  - edit_symbol
+  - outline
+  - run_command
+```
+
+#### SOP(标准操作流程)
+
+定义任务执行步骤和每步期望使用的工具,通过 `before_tool_callback` 检测偏离:
+
+```yaml
+# npc-config/sops/bugfix.yml
+name: bugfix
+description: Bug 修复流程
+steps:
+  - name: 复现
+    expected_tools: [run_command]
+    hint: 先复现 bug,确认问题存在
+  - name: 定位
+    expected_tools: [view_symbol, search_symbols]
+    hint: 阅读相关源码,定位根因
+  - name: 修复
+    expected_tools: [edit_symbol]
+    hint: 最小改动修复
+  - name: 验证
+    expected_tools: [run_command]
+    hint: 运行编译和测试验证
+```
+
+#### Skill(领域专家知识)
+
+基于任务类型和关键词自动匹配,为 Agent 注入领域专家指令和工具约束:
+
+```yaml
+# npc-config/skills/frontend.yml
+name: frontend
+description: 前端开发专家
+instruction: |
+  你是前端专家,遵循以下规范:
+  1. React/Vue 组件使用函数式声明
+  2. 状态管理优先使用 Hooks
+  3. CSS 采用 BEM 或 CSS Modules
+  4. 关注可访问性 (a11y)
+  5. 性能: 使用 useMemo/useCallback
+tools:
+  - view_symbol
+  - edit_symbol
+  - outline
+  - search_symbols
+scenarios:
+  task_kinds: [implement, refactor]
+  keywords: [前端, react, vue, css, ui, 组件, 页面, frontend]
+priority: 10
+```
+
+**技能匹配机制**:
+- 根据任务类型(`implement`/`fix`/`review`/`refactor`)和描述关键词自动匹配
+- 多 Skill 可叠加(如"前端开发" + "安全审计"同时匹配)
+- 按 `priority` 排序,高优先级 Skill 排前面
+- 匹配后注入:指令追加 + 工具进一步过滤
+
+**内置技能**:
+
+| 技能 | 适用场景 | 关键词 |
+|------|----------|--------|
+| `frontend` | implement/refactor | 前端, react, vue, css, ui, 组件 |
+| `backend` | implement/refactor | 后端, api, 接口, service, controller |
+| `database` | implement/refactor | 数据库, sql, 查询, 索引, migration |
+| `security` | fix/review | 安全, 漏洞, xss, sql注入, 注入 |
+
+#### Team(多角色协作)
+
+定义多 Agent 协作流程,基于 handoff 规则和信号传递串联:
+
+```yaml
+# npc-config/teams/feature-team.yml
+name: feature-team
+description: 功能开发团队(PM+开发+测试)
+npcs:
+  - role: pm
+    sop: requirement-decompose
+  - role: developer
+    sop: feature
+  - role: tester
+    sop: test-gen
+handoff:
+  - from: pm
+    to: [developer, tester]
+    trigger: pm 发出 "decomposed" 信号
+  - from: developer
+    to: [tester]
+    trigger: developer 发出 "implemented" 信号
+merge:
+  strategy: single-mr
+```
+
+**Team 执行模型**:
+1. 找到入口角色(未被任何 `handoff.to` 引用的角色)
+2. 顺序执行入口角色 Agent
+3. 从输出解析信号标记(格式: `[SIGNAL:xxx]`)
+4. 匹配 handoff 规则,递归执行下游角色
+5. 汇总所有步骤输出
+
+**三层能力注入流程**:
+```
+任务描述
+  ↓
+Skill 匹配 → 按 task_kind + keywords 选择领域技能
+  ↓
+Agent 构建 → Role(身份+工具) + SOP(流程) + Skill(知识)
+  ↓
+Team 编排 → PM 分解需求 → Developer 实现 → Tester 验证
+```
 
 ### 配置系统
 
@@ -189,7 +360,9 @@ devnpc:
 | 变量 | 说明 | 必填 |
 |------|------|------|
 | `DEVNPC_API_KEY` | LLM API Key | 是 |
-| `DEVNPC_GITLAB_TOKEN` | GitLab Personal Access Token (需 `api` 权限) | 是 |
+| `GITLAB_TOKEN` | GitLab Personal Access Token (需 `api` 权限) | 是 |
+
+> 注: `GITLAB_URL` 和 `CI_PROJECT_ID` 由 GitLab CI 自动注入,无需手动配置。本地运行时需手动设置。
 
 ### 4. 触发方式
 
@@ -242,19 +415,125 @@ CI 控制器 → 轮询 pipeline → 日志解析 → 修复失败 → 重试
 
 ## 环境变量
 
+### 必填变量
+
 ```bash
-# LLM 配置 (必填)
+# LLM 配置
 export DEVNPC_API_KEY="sk-xxxxxxxx"
 export DEVNPC_BASE_URL="https://api.deepseek.com/v1"
 export DEVNPC_MODEL="deepseek-chat"
 
-# GitLab 配置 (必填)
+# GitLab 配置 (CI 环境由 GitLab 自动注入,本地运行需手动设置)
 export GITLAB_URL="https://gitlab.example.com"
 export GITLAB_TOKEN="glpat-xxxxxxxx"
 export CI_PROJECT_ID="123"
 ```
 
+### 可选变量
+
+```bash
+# === 运行限制 ===
+export DEVNPC_MAX_ITERATIONS="20"          # Agent 最大迭代次数
+export DEVNPC_MAX_CI_RETRIES="3"          # CI 失败最大重试次数
+
+# === SOP 与报告 ===
+export DEVNPC_SOP_MODE="soft"              # soft(偏离警告) | strict(偏离阻断)
+export DEVNPC_REPORT_TARGET="artifact"     # artifact | pages | none
+
+# === 模型路由 (JSON 格式) ===
+export DEVNPC_MODEL_ROUTING='{"simple_model":"deepseek-chat","complex_model":"deepseek-chat"}'
+
+# === 命令安全 ===
+export DEVNPC_COMMAND_ALLOWLIST="cargo,rustc,make,just,fmt,clippy,echo"
+export DEVNPC_COMMAND_DENYLIST="rm,mv,cp,curl,wget,ssh,scp"
+export DEVNPC_DEFAULT_TIMEOUT_SECS="120"
+
+# === 文件读取 ===
+export DEVNPC_READ_FILE_MAX_LINES="200"
+
+# === 日志解析 ===
+export DEVNPC_LOG_PARSER_MAX_FAILURES="10"
+
+# === 仓库摘要 ===
+export DEVNPC_KEY_FILE_PATTERNS="Cargo.toml,README.md,main.rs,lib.rs"
+export DEVNPC_SUMMARY_README_LINES="30"
+export DEVNPC_SUMMARY_MAIN_RS_LINES="60"
+export DEVNPC_SUMMARY_OTHER_LINES="15"
+
+# === 上下文构建 ===
+export DEVNPC_CONTEXT_MAX_COMMITS="20"
+export DEVNPC_CONTEXT_MAX_PIPELINES="5"
+export DEVNPC_CONTEXT_MAX_CI_FAILURES="5"
+
+# === CI 闭环 ===
+export DEVNPC_CI_POLL_INTERVAL_SECS="10"
+export DEVNPC_CI_POLL_TIMEOUT_SECS="300"
+export DEVNPC_CI_PIPELINE_TIMEOUT_SECS="1800"
+export DEVNPC_CI_MAX_RETRIES="3"
+
+# === MCP / codemap ===
+export DEVNPC_MCP_ENABLED="false"           # 启用 MCP Gateway
+export DEVNPC_CODEMAP_PATH="codemap"        # codemap 二进制路径
+export DEVNPC_CODEMAP_DATA_DIR=".codemap"   # codemap 数据目录
+
+# === 长期记忆 ===
+export DEVNPC_MEMORY_ENABLED="false"
+export DEVNPC_MEMORY_DB_PATH=".devnpc-memory.db"
+
+# === NPC 配置 (Role/SOP/Skill/Team) ===
+export DEVNPC_NPC_CONFIG_ENABLED="true"
+export DEVNPC_NPC_CONFIG_BASE_DIR="npc-config"
+```
+
+> 完整变量名与默认值见 [src/config/loader.rs](src/config/loader.rs) 的 `load()` 函数。
+
+## MCP / codemap 集成
+
+devnpc 通过 MCP Gateway 支持外部 MCP 服务器，目前默认注册 [codemap](https://github.com/bm424/codemap)（Rust 实现的代码知识图谱 MCP 服务器，tree-sitter 解析 → 持久化图谱，可将结构性查询 token 消耗降低 90%+）。
+
+### 启用 codemap
+
+1. **安装 codemap 二进制**（devnpc 不打包 codemap，需独立安装）：
+
+   ```bash
+   # 从源码构建
+   cargo install codemap
+   # 或下载预编译二进制放入 PATH
+   ```
+
+2. **开启 MCP 开关并指定二进制路径**：
+
+   ```bash
+   export DEVNPC_MCP_ENABLED="true"
+   export DEVNPC_CODEMAP_PATH="codemap"      # 默认即 codemap
+   export DEVNPC_CODEMAP_DATA_DIR=".codemap"  # 数据持久化目录
+   ```
+
+3. devnpc 启动时会执行 `codemap serve --data-dir .codemap`（stdio 模式），并把 codemap 的工具注入到 Agent。
+
+### 注册其他 MCP 服务器
+
+devnpc 的 `McpGateway` 同时支持 HTTP/SSE 传输（MCP 2025-06-18 streamable HTTP spec），可通过 `McpServerDesc::http()` 在代码中注册：
+
+```rust
+use devnpc::adapter::mcp_gateway::{McpGateway, McpServerDesc};
+
+gateway.register_server(
+    McpServerDesc::http("remote-mcp", "https://mcp.example.com/sse")
+        .with_bearer("token-xxx")
+        .with_timeout(60)
+).await;
+gateway.connect_all().await?;
+```
+
+### 故障排查
+
+- 启动时 `MCP (stdio) 服务器连接失败` 警告：检查 `codemap` 是否在 `PATH` 中，或显式设置 `DEVNPC_CODEMAP_PATH` 为绝对路径。
+- HTTP 服务器连接失败：检查 URL 是否可达，Bearer/API Key 是否有效，可调高 `timeout_secs`。
+
 ## 使用方法
+
+### 构建
 
 ```bash
 # 构建 release 版本
@@ -265,12 +544,61 @@ cargo build --release
 
 # 查看当前配置(脱敏)
 ./target/release/devnpc config
+```
 
-# 本地执行任务
+### 本地运行
+
+本地运行需配置环境变量。推荐用 `.env` 文件(已被 `.gitignore` 忽略,不会提交):
+
+```bash
+# 1. 创建 .env 文件 (参考下方模板)
+cp .env.example .env  # 若无 .env.example,手动创建
+
+# 2. 编辑 .env 填入凭证
+#    GITLAB_URL=http://your-gitlab
+#    GITLAB_TOKEN=glpat-xxxxxxxx
+#    CI_PROJECT_ID=123
+#    DEVNPC_API_KEY=sk-xxxxxxxx
+#    DEVNPC_BASE_URL=https://api.deepseek.com/v1
+#    DEVNPC_MODEL=deepseek-chat
+
+# 3. 加载环境变量后运行 (PowerShell)
+Get-Content .env | ForEach-Object { if ($_ -match '^\s*([^#=]+)=(.*)$') { Set-Item -Path "Env:$($matches[1].Trim())" -Value $matches[2].Trim() } }
+./target/release/devnpc run --task "修复登录 bug"
+
+# 或 bash
+set -a && source .env && set +a
+./target/release/devnpc run --task "修复登录 bug"
+```
+
+### CLI 命令
+
+```bash
+# 本地执行任务 (手动指定任务描述)
 ./target/release/devnpc run --task "修复登录 bug"
 
 # 干跑模式(不真正改码,冒烟测试用)
 ./target/release/devnpc run --dry-run
+
+# 指定 Issue IID 拉取上下文 (通过环境变量)
+CI_ISSUE_IID=42 ./target/release/devnpc run --task "修复 issue 42 的 bug"
+```
+
+### 开发与测试
+
+```bash
+# 运行全部测试 (311 个)
+cargo test --lib
+
+# 运行指定模块测试
+cargo test --lib gitlab_api
+cargo test --lib memory::context
+
+# 静态检查 (零警告)
+cargo clippy --lib -- -D warnings
+
+# 检查特定模块
+cargo clippy --lib --message-format=short
 ```
 
 ## 项目配置(.devnpc.md)
@@ -308,20 +636,39 @@ soft  # 或 strict
 devnpc/
 ├── src/
 │   ├── adapter/        # adk-rust 框架适配层
+│   │   ├── agents.rs       # CodeAgent / FixAgent / ReviewAgent 构建
+│   │   ├── callbacks.rs     # SOP 检测 + 轨迹记录
+│   │   ├── context.rs       # 业务上下文 → Session 注入
+│   │   ├── file_io.rs      # 带路径安全检查的文件 I/O
+│   │   ├── mcp_gateway.rs   # MCP Gateway (stdio + HTTP)
+│   │   ├── memory.rs        # 长期记忆 (SQLite)
+│   │   ├── orchestrator.rs  # 任务编排 + 并行子 Agent
+│   │   ├── provider.rs      # 多模型提供商配置
+│   │   └── tools.rs         # 业务工具 → FunctionTool 包装
 │   ├── ci/             # CI 闭环控制器
-│   ├── config/         # 配置系统 (三层合并)
+│   │   ├── controller.rs    # MR → Pipeline → 日志 → 修复
+│   │   └── log_parser.rs    # 失败日志解析 (Compile/Test/Timeout)
+│   ├── config/         # 配置系统 (三层合并 + npc_config)
+│   │   ├── loader.rs        # env > .devnpc.md > 默认值
+│   │   ├── npc_config.rs    # Role + SOP + Team 加载与注入
+│   │   └── skill.rs         # Skill 注册表与匹配逻辑
 │   ├── git/            # GitOps 封装
-│   ├── gitlab_api/     # GitLab REST v4 客户端
+│   ├── gitlab_api/     # GitLab REST v4 客户端 (16 trait 方法)
+│   │   ├── client.rs        # reqwest 实现 + wiremock 测试
+│   │   ├── issues.rs        # Issue 上下文聚合 helper
+│   │   ├── mrs.rs           # MR 上下文聚合 + 状态判断 helper
+│   │   ├── notes.rs         # 评论过滤/提及提取/指令检测 helper
+│   │   ├── pipelines.rs     # 批量日志拉取/失败过滤 helper
+│   │   └── repo.rs          # 仓库文件读写/目录过滤 helper
 │   ├── memory/         # 研发记忆聚合
+│   │   ├── context.rs       # Context::build (并行拉取 + CI 根因解析)
+│   │   └── repo_index.rs    # 仓库树构建 + 关键文件摘要
 │   ├── report/         # 运维报告
 │   ├── trigger/        # 事件触发
 │   ├── error.rs        # 统一错误类型
 │   ├── lib.rs          # 模块树
 │   └── main.rs         # CLI 入口 (LlmAgent + Runner)
-├── npc-config/
-│   ├── roles/          # NPC 角色定义 (developer/tester/pm)
-│   ├── sops/           # 标准操作流程 (feature/bugfix/test-gen)
-│   └── teams/          # 团队编排配置
+├── npc-config/         # NPC 角色/SOP/团队配置
 ├── docs/superpowers/   # 设计文档与计划
 ├── Dockerfile
 ├── .gitlab-ci.yml.example

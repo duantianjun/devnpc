@@ -1,7 +1,6 @@
-//! 触发解析器 (P5 完整实现)
+//! 触发解析器
 //!
-//! MVP: MR 评论 + 手动触发
-//! P5+: Issue 评论 + Issue 创建
+//! 支持三种触发源: MR 评论 + Issue 评论 + 手动 --task 参数。
 
 use regex::Regex;
 use serde::Deserialize;
@@ -32,7 +31,7 @@ pub enum TaskKind {
     Review,
 }
 
-/// 从评论中查找 @devnpc 提及并解析任务 (P5 实现)
+/// 从评论中查找 @devnpc 提及并解析任务
 pub fn parse_mention(body: &str) -> Option<TaskSpec> {
     // 查找 @devnpc 提及
     let re = Regex::new(r"@devnpc\s*(.*)").ok()?;
@@ -58,7 +57,7 @@ pub fn parse_mention(body: &str) -> Option<TaskSpec> {
     })
 }
 
-/// 根据关键字识别任务类型 (P5 实现)
+/// 根据关键字识别任务类型
 pub fn classify_task(text: &str) -> TaskKind {
     let lower = text.to_lowercase();
     if lower.contains("修复") || lower.contains("fix") || lower.contains("bug") {

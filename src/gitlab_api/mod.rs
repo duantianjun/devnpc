@@ -36,6 +36,24 @@ pub trait GitlabApi: Send + Sync {
 
     /// 获取 job 的原始日志
     async fn get_job_log(&self, project_id: u64, job_id: u64) -> Result<String>;
+
+    // === 资源级补充方法 (pipelines.rs / repo.rs 高层 helper 依赖) ===
+
+    /// 获取单条 pipeline 详情 (GET /projects/:id/pipelines/:pipeline_id)
+    async fn get_pipeline(&self, project_id: u64, pipeline_id: u64) -> Result<Pipeline>;
+
+    /// 读取仓库文件原始内容 (GET /projects/:id/repository/files/:file_path?raw=1)
+    ///
+    /// `file_path` 路径分隔符 `/` 会被编码为 `%2F`。`ref_` 为分支/tag/commit。
+    async fn get_file(&self, project_id: u64, file_path: &str, ref_: &str) -> Result<String>;
+
+    /// 列出仓库目录树 (GET /projects/:id/repository/tree?path=...&ref=...)
+    async fn list_tree(
+        &self,
+        project_id: u64,
+        path: &str,
+        ref_: &str,
+    ) -> Result<Vec<RepoTreeEntry>>;
 }
 
 // === 数据模型 ===
@@ -95,6 +113,18 @@ pub struct Note {
     pub body: String,
     pub author: NoteAuthor,
     pub created_at: String,
+}
+
+/// 仓库目录树条目 (GET /projects/:id/repository/tree 单项)
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RepoTreeEntry {
+    pub id: String,
+    pub name: String,
+    /// `tree` | `blob`
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub path: String,
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -1,6 +1,6 @@
 # devnpc P1: 配置系统 + GitLab API 客户端 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 实现 `Config::load()` 完整逻辑 (env + `.devnpc.md` 解析) 与 `GitlabClient` 所有 API 方法 (reqwest 调用 GitLab REST v4),补充单元测试,使 `devnpc config` 命令能打印合并后的配置,`GitlabClient` 能从真实 GitLab 读取 Issue/MR/Pipeline/Notes。
 
@@ -47,7 +47,7 @@ P1 修改以下文件,职责单一:
 - Modify: `Cargo.toml`
 - Modify: `src/error.rs`
 
-- [ ] **Step 1: 在 Cargo.toml 添加 wiremock dev-dependency**
+- [x] **Step 1: 在 Cargo.toml 添加 wiremock dev-dependency**
 
 Modify `Cargo.toml` 的 `[dev-dependencies]` 节,在 `tempfile = "3"` 之后添加:
 
@@ -55,7 +55,7 @@ Modify `Cargo.toml` 的 `[dev-dependencies]` 节,在 `tempfile = "3"` 之后添�
 wiremock = "0.6"
 ```
 
-- [ ] **Step 2: 在 error.rs 新增 Reqwest 与 Yaml 错误变体**
+- [x] **Step 2: 在 error.rs 新增 Reqwest 与 Yaml 错误变体**
 
 Modify `src/error.rs`,在 `Io(#[from] std::io::Error)` 之前添加两个变体:
 
@@ -84,12 +84,12 @@ Modify `src/error.rs`,在 `Io(#[from] std::io::Error)` 之前添加两个变体:
 }
 ```
 
-- [ ] **Step 3: 验证编译**
+- [x] **Step 3: 验证编译**
 
 Run: `cargo build`
 Expected: 编译成功 (wiremock 会下载)。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add Cargo.toml Cargo.lock src/error.rs
@@ -104,7 +104,7 @@ git commit -m "feat: 新增 wiremock dev-dep + Reqwest/Yaml 错误变体"
 - Create: `src/config/devnpc_md.rs`
 - Modify: `src/config/mod.rs`
 
-- [ ] **Step 1: 写失败测试 - 解析 .devnpc.md**
+- [x] **Step 1: 写失败测试 - 解析 .devnpc.md**
 
 Create `src/config/devnpc_md.rs`:
 
@@ -261,7 +261,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 在 config/mod.rs 注册 devnpc_md 子模块**
+- [x] **Step 2: 在 config/mod.rs 注册 devnpc_md 子模块**
 
 Modify `src/config/mod.rs`,在 `pub mod env;` 之后添加:
 
@@ -269,12 +269,12 @@ Modify `src/config/mod.rs`,在 `pub mod env;` 之后添加:
 pub mod devnpc_md;
 ```
 
-- [ ] **Step 3: 运行测试验证**
+- [x] **Step 3: 运行测试验证**
 
 Run: `cargo test --lib config::devnpc_md`
 Expected: 6 个测试 PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/config/devnpc_md.rs src/config/mod.rs
@@ -288,7 +288,7 @@ git commit -m "feat: .devnpc.md 解析 (front matter + 正文)"
 **Files:**
 - Modify: `src/config/env.rs`
 
-- [ ] **Step 1: 写失败测试 - 类型化环境变量解析**
+- [x] **Step 1: 写失败测试 - 类型化环境变量解析**
 
 Replace `src/config/env.rs` 完整内容为:
 
@@ -472,12 +472,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试验证**
+- [x] **Step 2: 运行测试验证**
 
 Run: `cargo test --lib config::env`
 Expected: 11 个测试 PASS。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/config/env.rs
@@ -491,7 +491,7 @@ git commit -m "feat: 环境变量类型解析 (u32/u8/SopMode/ReportTarget)"
 **Files:**
 - Modify: `src/config/mod.rs`
 
-- [ ] **Step 1: 在 ProjectConfig 加 max_ci_retries 字段**
+- [x] **Step 1: 在 ProjectConfig 加 max_ci_retries 字段**
 
 Modify `src/config/mod.rs` 的 `ProjectConfig` struct,在 `branch_prefix` 之后、`guidelines_markdown` 之前添加字段:
 
@@ -510,12 +510,12 @@ pub struct ProjectConfig {
 
 注: `max_ci_retries: Option<u8>` 用 None 表示"未在 .devnpc.md 指定,用环境变量或默认"。
 
-- [ ] **Step 2: 验证编译 (Default 仍可用)**
+- [x] **Step 2: 验证编译 (Default 仍可用)**
 
 Run: `cargo build`
 Expected: 编译成功 (`Option<u8>` 默认 None)。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/config/mod.rs
@@ -530,7 +530,7 @@ git commit -m "feat: ProjectConfig 加 max_ci_retries 字段"
 - Modify: `src/config/loader.rs`
 - Modify: `src/config/mod.rs`
 
-- [ ] **Step 1: 写失败测试 - Config::load 合并逻辑**
+- [x] **Step 1: 写失败测试 - Config::load 合并逻辑**
 
 先在 `src/config/loader.rs` 末尾追加测试模块 (Step 2 会实现 `load_internal` 使其通过):
 
@@ -724,7 +724,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 实现 load_internal 与合并逻辑**
+- [x] **Step 2: 实现 load_internal 与合并逻辑**
 
 Replace `src/config/loader.rs` 的占位内容 (保留 Step 1 的 tests 模块),在文件顶部添加实现:
 
@@ -866,7 +866,7 @@ pub fn load() -> Result<Config> {
 }
 ```
 
-- [ ] **Step 3: 修改 Config::load 调用 loader**
+- [x] **Step 3: 修改 Config::load 调用 loader**
 
 Modify `src/config/mod.rs` 的 `Config::load()`,替换占位实现:
 
@@ -879,14 +879,14 @@ impl Config {
 }
 ```
 
-- [ ] **Step 4: 运行测试验证**
+- [x] **Step 4: 运行测试验证**
 
 Run: `cargo test --lib config::loader`
 Expected: 4 个测试 PASS。
 
 注: 测试用唯一环境变量前缀 `DEVNPC_TEST_*` 避免并行污染。若 CI 报并行冲突,改为 `cargo test --lib config::loader -- --test-threads=1`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/config/loader.rs src/config/mod.rs
@@ -900,7 +900,7 @@ git commit -m "feat: 配置加载器三层合并 (env > .devnpc.md > 默认)"
 **Files:**
 - Modify: `src/gitlab_api/client.rs`
 
-- [ ] **Step 1: 写失败测试 - get_issue (wiremock)**
+- [x] **Step 1: 写失败测试 - get_issue (wiremock)**
 
 在 `src/gitlab_api/client.rs` 末尾追加测试模块:
 
@@ -958,7 +958,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 实现 GitlabClient 内部 get/post 封装 + get_issue**
+- [x] **Step 2: 实现 GitlabClient 内部 get/post 封装 + get_issue**
 
 Replace `src/gitlab_api/client.rs` 完整内容为:
 
@@ -1173,12 +1173,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: 运行测试验证**
+- [x] **Step 3: 运行测试验证**
 
 Run: `cargo test --lib gitlab_api::client`
 Expected: 2 个测试 PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/gitlab_api/client.rs
@@ -1192,7 +1192,7 @@ git commit -m "feat: GitlabClient get_issue 实现 (reqwest + wiremock 测试)"
 **Files:**
 - Modify: `src/gitlab_api/client.rs` (仅测试模块追加)
 
-- [ ] **Step 1: 追加 get_mr 与 create_mr 测试**
+- [x] **Step 1: 追加 get_mr 与 create_mr 测试**
 
 在 `src/gitlab_api/client.rs` 的 `mod tests` 内追加 (在最后一个 `}` 之前):
 
@@ -1275,12 +1275,12 @@ git commit -m "feat: GitlabClient get_issue 实现 (reqwest + wiremock 测试)"
     }
 ```
 
-- [ ] **Step 2: 运行测试验证**
+- [x] **Step 2: 运行测试验证**
 
 Run: `cargo test --lib gitlab_api::client`
 Expected: 5 个测试 PASS (原 2 + 新 3)。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/gitlab_api/client.rs
@@ -1294,7 +1294,7 @@ git commit -m "test: GitlabClient get_mr/create_mr 测试 (wiremock)"
 **Files:**
 - Modify: `src/gitlab_api/client.rs` (仅测试模块追加)
 
-- [ ] **Step 1: 追加 pipelines/notes 测试**
+- [x] **Step 1: 追加 pipelines/notes 测试**
 
 在 `src/gitlab_api/client.rs` 的 `mod tests` 内追加:
 
@@ -1400,12 +1400,12 @@ git commit -m "test: GitlabClient get_mr/create_mr 测试 (wiremock)"
     }
 ```
 
-- [ ] **Step 2: 运行测试验证**
+- [x] **Step 2: 运行测试验证**
 
 Run: `cargo test --lib gitlab_api::client`
 Expected: 10 个测试 PASS (原 5 + 新 5)。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add src/gitlab_api/client.rs
@@ -1419,7 +1419,7 @@ git commit -m "test: GitlabClient pipelines/notes 测试 (wiremock)"
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: 修改 print_config 调用 Config::load**
+- [x] **Step 1: 修改 print_config 调用 Config::load**
 
 Modify `src/main.rs` 的 `print_config` 函数,替换占位:
 
@@ -1456,12 +1456,12 @@ fn print_config() -> Result<()> {
 }
 ```
 
-- [ ] **Step 2: 验证编译**
+- [x] **Step 2: 验证编译**
 
 Run: `cargo build`
 Expected: 编译成功。
 
-- [ ] **Step 3: 手动验证 config 命令**
+- [x] **Step 3: 手动验证 config 命令**
 
 设测试环境变量并运行 (PowerShell):
 
@@ -1471,7 +1471,7 @@ $env:DEVNPC_API_KEY="sk-test1234567890"; $env:DEVNPC_BASE_URL="https://api.deeps
 
 Expected: 打印配置摘要,`api_key: sk-t***` 脱敏,`project_id: 42`。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/main.rs
@@ -1485,7 +1485,7 @@ git commit -m "feat: CLI config 命令接入 Config::load"
 **Files:**
 - 无新文件
 
-- [ ] **Step 1: 全量编译与测试**
+- [x] **Step 1: 全量编译与测试**
 
 Run:
 
@@ -1500,26 +1500,26 @@ Expected:
 - `cargo test`: 全部 PASS (P0 的 13 + P1 新增约 25 = 约 38 个测试)
 - `cargo build --release`: 成功
 
-- [ ] **Step 2: 运行 clippy**
+- [x] **Step 2: 运行 clippy**
 
 Run: `cargo clippy -- -D warnings`
 Expected: 无 warning。若有 dead_code warning (如未用的 URL 构造方法),加 `#[allow(dead_code)]` 或删除。
 
-- [ ] **Step 3: P1 验收检查**
+- [x] **Step 3: P1 验收检查**
 
 逐项确认:
 
-- [ ] `cargo build` 成功
-- [ ] `cargo test` 全部 PASS
-- [ ] `cargo clippy -- -D warnings` 无 warning
-- [ ] `cargo run -- config` 在设环境变量后正常打印配置
-- [ ] `Config::load()` 三层合并逻辑有测试覆盖 (env 覆盖 .devnpc.md 覆盖默认)
-- [ ] `.devnpc.md` 解析有 6 个测试 (front matter/正文/边界)
-- [ ] `GitlabClient` 7 个 API 方法均有 wiremock 测试
-- [ ] 404 返回 `GitlabNotFound`,其他非 2xx 返回 `GitlabApi`
-- [ ] git 历史清晰 (约 9 个新提交)
+- [x] `cargo build` 成功
+- [x] `cargo test` 全部 PASS
+- [x] `cargo clippy -- -D warnings` 无 warning
+- [x] `cargo run -- config` 在设环境变量后正常打印配置
+- [x] `Config::load()` 三层合并逻辑有测试覆盖 (env 覆盖 .devnpc.md 覆盖默认)
+- [x] `.devnpc.md` 解析有 6 个测试 (front matter/正文/边界)
+- [x] `GitlabClient` 7 个 API 方法均有 wiremock 测试
+- [x] 404 返回 `GitlabNotFound`,其他非 2xx 返回 `GitlabApi`
+- [x] git 历史清晰 (约 9 个新提交)
 
-- [ ] **Step 4: 提交验收记录 (可选)**
+- [x] **Step 4: 提交验收记录 (可选)**
 
 若有 clippy 修复,提交:
 
