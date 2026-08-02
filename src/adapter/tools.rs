@@ -338,7 +338,7 @@ fn create_mr_note_tool(gitlab: Arc<dyn GitlabApi>, project_id: u64) -> FunctionT
 }
 
 // ============================================================
-// AFT 代码感知工具 (基于 tree-sitter, 支持 Rust + Java)
+// AFT 代码感知工具 (基于 tree-sitter, 支持 Rust + Java + Python + JS/TS + Go + C/C++)
 // ============================================================
 
 /// 支持的语言
@@ -346,6 +346,13 @@ fn create_mr_note_tool(gitlab: Arc<dyn GitlabApi>, project_id: u64) -> FunctionT
 enum Language {
     Rust,
     Java,
+    Python,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Go,
+    C,
+    Cpp,
 }
 
 /// 根据文件扩展名检测语言
@@ -353,6 +360,13 @@ fn detect_language(path: &std::path::Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "rs" => Some(Language::Rust),
         "java" => Some(Language::Java),
+        "py" => Some(Language::Python),
+        "js" | "jsx" => Some(Language::JavaScript),
+        "ts" => Some(Language::TypeScript),
+        "tsx" => Some(Language::Tsx),
+        "go" => Some(Language::Go),
+        "c" | "h" => Some(Language::C),
+        "cpp" | "hpp" | "cc" | "cxx" => Some(Language::Cpp),
         _ => None,
     }
 }
@@ -362,6 +376,13 @@ fn get_language(lang: Language) -> tree_sitter::Language {
     match lang {
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::Java => tree_sitter_java::LANGUAGE.into(),
+        Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::C => tree_sitter_c::LANGUAGE.into(),
+        Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
     }
 }
 
@@ -378,6 +399,21 @@ fn interesting_kinds(lang: Language) -> &'static [&'static str] {
             "record_declaration", "method_declaration", "constructor_declaration",
             "field_declaration", "annotation_type_declaration",
         ],
+        Language::Python => &[
+            "function_definition", "class_definition",
+        ],
+        Language::JavaScript | Language::TypeScript | Language::Tsx => &[
+            "function_declaration", "class_declaration", "method_definition",
+            "interface_declaration", "type_alias_declaration", "enum_declaration",
+        ],
+        Language::Go => &[
+            "function_declaration", "method_declaration", "type_declaration",
+            "type_spec",
+        ],
+        Language::C | Language::Cpp => &[
+            "function_definition", "struct_specifier", "union_specifier",
+            "enum_specifier", "type_definition",
+        ],
     }
 }
 
@@ -387,10 +423,24 @@ fn parse_source(source: &str, lang: Language) -> tree_sitter::Tree {
     thread_local! {
         static RUST_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
         static JAVA_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static PYTHON_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static JS_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static TS_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static TSX_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static GO_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static C_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static CPP_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
     }
     let parser_cell = match lang {
         Language::Rust => &RUST_PARSER,
         Language::Java => &JAVA_PARSER,
+        Language::Python => &PYTHON_PARSER,
+        Language::JavaScript => &JS_PARSER,
+        Language::TypeScript => &TS_PARSER,
+        Language::Tsx => &TSX_PARSER,
+        Language::Go => &GO_PARSER,
+        Language::C => &C_PARSER,
+        Language::Cpp => &CPP_PARSER,
     };
     parser_cell.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -474,7 +524,7 @@ fn find_symbol_node<'a>(
     None
 }
 
-/// 递归收集源码文件 (.rs / .java)
+/// 递归收集源码文件 (.rs / .java / .py / .js / .ts / .go / .c / .cpp ...)
 fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize) {
     if depth > 10 {
         return;
@@ -491,7 +541,7 @@ fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize)
             }
             collect_source_files(&path, results, depth + 1);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
-            && (ext == "rs" || ext == "java") {
+            && matches!(ext, "rs" | "java" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "c" | "h" | "cpp" | "hpp" | "cc" | "cxx") {
                 results.push(path);
             }
     }
@@ -503,7 +553,7 @@ fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Langua
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
     })?;
     let lang = detect_language(&full).ok_or_else(|| {
-        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs 和 .java: {path}"))
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp: {path}"))
     })?;
     let source = std::fs::read_to_string(&full).map_err(|e| {
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
@@ -512,11 +562,11 @@ fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Langua
     Ok((tree, lang))
 }
 
-/// aft_outline: 列出文件的所有顶层符号 (Rust + Java)
+/// aft_outline: 列出文件的所有顶层符号 (多语言)
 fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_outline",
-        "列出源码文件的所有顶层符号 (Rust: 函数/结构体/枚举/Trait; Java: 类/接口/方法/字段),返回符号名+行号范围。支持 .rs 和 .java 文件。",
+        "列出源码文件的所有顶层符号,返回符号名+行号范围。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -537,7 +587,7 @@ fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
                 let lines: Vec<String> = symbols
                     .iter()
                     .map(|s| {
-                        let kind_short = s.kind.trim_end_matches("_item").trim_end_matches("_declaration");
+                        let kind_short = s.kind.trim_end_matches("_item").trim_end_matches("_declaration").trim_end_matches("_specifier").trim_end_matches("_definition");
                         format!("{kind_short} {} (line {}-{})", s.name, s.start_line, s.end_line)
                     })
                     .collect();
@@ -551,7 +601,7 @@ fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_view_symbol",
-        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs 和 .java。",
+        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -585,7 +635,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_edit_symbol",
-        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs 和 .java。",
+        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -638,7 +688,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_search_symbols",
-        "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。搜索 .rs 和 .java 文件。",
+        "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。搜索 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -680,7 +730,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
                             matches.push(format!(
                                 "{}: {} {} (line {})",
                                 rel,
-                                sym.kind.trim_end_matches("_item").trim_end_matches("_declaration"),
+                                sym.kind.trim_end_matches("_item").trim_end_matches("_declaration").trim_end_matches("_specifier").trim_end_matches("_definition"),
                                 sym.name,
                                 sym.start_line
                             ));
@@ -701,7 +751,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_ast_replace",
-        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs 和 .java。",
+        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {

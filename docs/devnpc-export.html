@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>devnpc 研发流程 AI 智能体</title>
+<style>
+  @page { margin: 2cm; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    color: #1a1a1a;
+    background: #fff;
+    line-height: 1.8;
+    padding: 40px 60px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 28px;
+    text-align: center;
+    margin-bottom: 8px;
+    letter-spacing: 2px;
+    color: #1a1a1a;
+  }
+  .date {
+    text-align: center;
+    color: #888;
+    font-size: 14px;
+    margin-bottom: 40px;
+  }
+  h2 {
+    font-size: 20px;
+    margin: 36px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #1a1a1a;
+    color: #1a1a1a;
+  }
+  h3 {
+    font-size: 17px;
+    margin: 24px 0 12px 0;
+    color: #333;
+  }
+  p { margin-bottom: 12px; font-size: 15px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px 0;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 10px 14px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #f5f5f5;
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+  td { color: #333; }
+  blockquote {
+    border-left: 4px solid #1a1a1a;
+    padding: 12px 18px;
+    margin: 16px 0;
+    background: #f9f9f9;
+    font-size: 14px;
+    color: #555;
+  }
+  pre {
+    background: #f5f5f5;
+    padding: 14px 18px;
+    border-radius: 4px;
+    font-family: "SF Mono", "Cascadia Code", monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 16px 0;
+    white-space: pre-wrap;
+  }
+  code {
+    font-family: "SF Mono", "Cascadia Code", monospace;
+    font-size: 13px;
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  ul, ol { margin: 8px 0 16px 20px; font-size: 15px; }
+  li { margin-bottom: 6px; }
+  strong { color: #1a1a1a; }
+  hr {
+    border: none;
+    border-top: 1px solid #eee;
+    margin: 32px 0;
+  }
+  .section-highlight {
+    background: #f9f9f9;
+    padding: 20px 24px;
+    border-radius: 6px;
+    margin: 16px 0;
+  }
+  @media print {
+    body { padding: 0; }
+    h2 { page-break-after: avoid; }
+    table { page-break-inside: avoid; }
+    .no-print { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>devnpc 研发流程 AI 智能体</h1>
+<p class="date">2026 年 8 月</p>
+
+<hr>
+
+<h2>一、核心定位</h2>
+<p>devnpc 是一款<strong>嵌入研发流程的自主执行型 AI Agent</strong>。它监听 GitLab 平台(Issue/MR)中的任务指令,在 CI 环境内自主完成"理解上下文 → 修改代码 → 提交验证 → 跟踪 CI → 修复失败"的全闭环工作,把研发从重复性劳动中解放出来。</p>
+<p><strong>一句话:</strong>把"人执行"变为"AI 执行+人审核",人只在关键决策点介入。</p>
+
+<hr>
+
+<h2>二、背景与痛点</h2>
+<p>在企业级研发协同中,以下场景长期占用研发大量时间:</p>
+<table>
+  <tr><th>场景</th><th>痛点</th><th>影响</th></tr>
+  <tr><td><strong>CI 失败修复</strong></td><td>提交后 CI 报错,需人工排查日志、定位根因、改码重提</td><td>阻塞集成,等待时间长</td></tr>
+  <tr><td><strong>重复性 Issue 处理</strong></td><td>简单 bug、文档修正、依赖升级等机械任务</td><td>占用高价值工程师时间</td></tr>
+  <tr><td><strong>跨上下文切换</strong></td><td>修一个 bug 需翻阅 Issue、PR 历史、代码、CI 日志</td><td>上下文重建成本高</td></tr>
+  <tr><td><strong>夜间/休假响应</strong></td><td>非工作时间 CI 失败无人处理</td><td>拖延交付节奏</td></tr>
+  <tr><td><strong>研发规范落地难</strong></td><td>编码规范、检查清单靠人记忆</td><td>规范执行不到位</td></tr>
+</table>
+
+<hr>
+
+<h2>三、解决思路</h2>
+<p>devnpc 的核心理念是:把<strong>标准化、可描述</strong>的研发操作流程固化下来,交给 AI 自主执行。</p>
+
+<h3>3.1 工作流程</h3>
+<pre>传统流程:
+  Issue → 人工分析 → 人工改码 → 人工提交 → CI 验证 → 人工修复 → 合并
+
+devnpc 流程:
+  Issue → @devnpc → AI 自主改码+提交+验证+修复 → 人工 Review → 合并</pre>
+<p><strong>关键变化:</strong>人的角色从"执行者"变为"审核者",AI 承担机械性执行工作。</p>
+
+<h3>3.2 运行方式</h3>
+<ul>
+  <li><strong>触发:</strong>研发在 Issue 或 MR 评论中 <code>@devnpc</code> 并描述任务,即可触发执行</li>
+  <li><strong>执行:</strong>在 GitLab CI 环境中运行,访问仓库代码、GitLab API、LLM 进行决策</li>
+  <li><strong>输出:</strong>AI 修改代码、提交 MR、跟踪 CI 结果,全程生成执行轨迹供审计</li>
+  <li><strong>审核:</strong>最终 MR 仍需人工 Review,AI 不跳过审核环节</li>
+</ul>
+
+<hr>
+
+<h2>四、核心价值</h2>
+<table>
+  <tr><th>维度</th><th>价值</th></tr>
+  <tr><td><strong>降本</strong></td><td>机械性研发任务(简单 bug、文档、依赖升级)由 AI 承担,预计可释放研发 15%–25% 工时</td></tr>
+  <tr><td><strong>提效</strong></td><td>CI 失败从"小时级等待"压缩到"分钟级自动修复",集成节奏显著加快</td></tr>
+  <tr><td><strong>全天候</strong></td><td>7×24 响应,夜间/休假 CI 失败不再阻塞次日交付</td></tr>
+  <tr><td><strong>规范落地</strong></td><td>项目编码规范、检查清单以标准化流程形式注入 AI,执行一致性 100%</td></tr>
+  <tr><td><strong>可审计</strong></td><td>完整执行轨迹可追溯、可复盘,每次任务有据可查</td></tr>
+  <tr><td><strong>低侵入</strong></td><td>复用现有 GitLab 工作流,不改变研发使用习惯,仅需在评论中 <code>@devnpc</code> 即可触发</td></tr>
+</table>
+
+<hr>
+
+<h2>五、适用场景</h2>
+
+<h3>5.1 CI 修复闭环(最核心场景)</h3>
+<p>研发提交 MR 后 Pipeline 失败,以往需要人工查看日志、定位问题、改代码、重新提交。devnpc 自动接管这个闭环:</p>
+<blockquote>MR 提交 → CI 失败 → devnpc 分析日志 → 定位根因 → 修改代码 → 重新提交 → 跟踪验证 → 通过的 MR 等待人工 Review</blockquote>
+
+<h3>5.2 简单 Issue 自助处理</h3>
+<p>对于标签为"简单修复"的 Issue(如修正拼写错误、更新文档、调整配置),研发可直接 <code>@devnpc</code> 交给 AI 处理,无需打断当前工作流。</p>
+
+<h3>5.3 批量机械任务</h3>
+<p>依赖升级、API 重命名、日志格式统一等批量改动,人工做枯燥且容易漏改,AI 处理更可靠。</p>
+
+<h3>5.4 新成员辅助</h3>
+<p>新成员提交 MR 后,devnpc 可自动检查规范问题并给出修复建议,降低新成员入门门槛。</p>
+
+<h3>5.5 夜间值守</h3>
+<p>非工作时间 CI 失败自动修复,次日上午研发直接 Review 已修复的 MR,不浪费等待时间。</p>
+
+<hr>
+
+<h2>六、方案亮点</h2>
+
+<h3>6.1 规范可执行</h3>
+<p>传统的研发规范写在文档里,靠人遵守。devnpc 把规范提炼为<strong>标准作业程序(SOP)</strong>,AI 执行时自动遵循,偏离时记录警告。规范从"纸面"变成"可执行约束"。</p>
+
+<h3>6.2 上下文不丢失</h3>
+<p>AI 执行任务前,主动聚合多源信息:</p>
+<ul>
+  <li>仓库目录结构</li>
+  <li>关键文件内容</li>
+  <li>目标 Issue 及其描述</li>
+  <li>相关 PR 历史</li>
+  <li>历史评论</li>
+</ul>
+<p>所有决策基于真实研发上下文,避免"凭空猜测"。</p>
+
+<h3>6.3 安全可控</h3>
+<p>AI 的所有操作在安全约束内执行:</p>
+<ul>
+  <li>只能修改指定目录,不能越界访问</li>
+  <li>仅允许执行构建/测试命令,禁止危险操作</li>
+  <li>禁止操作主分支,强制走 MR 流程</li>
+  <li>命令超时自动终止,防止死循环</li>
+</ul>
+
+<h3>6.4 协同可扩展</h3>
+<p>支持多角色分工(开发/测试/运维),复杂任务可拆解为多个子任务由不同角色 AI 协同完成,突破单 Agent 能力边界。</p>
+
+<hr>
+
+<h2>七、预期收益</h2>
+<table>
+  <tr><th>指标</th><th>预期改善</th></tr>
+  <tr><td>CI 失败修复周期</td><td>从小时级 → 分钟级</td></tr>
+  <tr><td>简单 Issue 处理时间</td><td>从人工 30-60 分钟 → AI 5-10 分钟</td></tr>
+  <tr><td>研发工时释放</td><td>日常重复性工作释放 15%–25%</td></tr>
+  <tr><td>夜间/休假响应</td><td>从无人响应 → 7×24 自动处理</td></tr>
+  <tr><td>规范执行率</td><td>从依赖人工记忆 → 100% 自动执行</td></tr>
+</table>
+
+<hr>
+
+<h2>八、总结</h2>
+<p>devnpc 定位为<strong>研发流程的自主执行型 AI Agent</strong>,核心价值在于把研发从机械性、等待性劳动中解放,让人聚焦创造性工作。</p>
+<p>它<strong>不是</strong>通用的代码生成工具,而是嵌入企业现有研发流程的"执行者"——不改变人的工作习惯,不跳过人的审核环节,只在"执行"层面用 AI 替代人力,降低重复劳动占比,提升整体研发交付效率。</p>
+
+</body>
+</html>
