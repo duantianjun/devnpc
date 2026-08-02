@@ -161,7 +161,7 @@ fn create_run_command_tool(
 
     FunctionTool::new(
         "run_command",
-        "在 workspace 内执行白名单命令 (cargo/rustc/make/just 等)。参数: cmd, args, timeout_secs。",
+        "在 workspace 内执行白名单命令 (cargo/mvn/gradle/npm/python/go 等)。参数: cmd, args, timeout_secs。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let workspace = workspace.clone();
             let allowlist = allowlist.clone();
@@ -403,16 +403,21 @@ fn interesting_kinds(lang: Language) -> &'static [&'static str] {
             "function_definition", "class_definition",
         ],
         Language::JavaScript | Language::TypeScript | Language::Tsx => &[
-            "function_declaration", "class_declaration", "method_definition",
+            "function_declaration", "generator_function_declaration",
+            "class_declaration", "method_definition",
             "interface_declaration", "type_alias_declaration", "enum_declaration",
         ],
         Language::Go => &[
             "function_declaration", "method_declaration", "type_declaration",
             "type_spec",
         ],
-        Language::C | Language::Cpp => &[
+        Language::C => &[
             "function_definition", "struct_specifier", "union_specifier",
             "enum_specifier", "type_definition",
+        ],
+        Language::Cpp => &[
+            "function_definition", "class_specifier", "struct_specifier",
+            "union_specifier", "enum_specifier", "type_definition",
         ],
     }
 }
@@ -553,7 +558,7 @@ fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Langua
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
     })?;
     let lang = detect_language(&full).ok_or_else(|| {
-        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp: {path}"))
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx: {path}"))
     })?;
     let source = std::fs::read_to_string(&full).map_err(|e| {
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
@@ -566,7 +571,7 @@ fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Langua
 fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_outline",
-        "列出源码文件的所有顶层符号,返回符号名+行号范围。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
+        "列出源码文件的所有顶层符号,返回符号名+行号范围。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -601,7 +606,7 @@ fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_view_symbol",
-        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
+        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -635,7 +640,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_edit_symbol",
-        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
+        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -688,7 +693,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_search_symbols",
-        "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。搜索 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
+        "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。搜索 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -751,7 +756,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_ast_replace",
-        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs/.java/.py/.js/.ts/.go/.c/.cpp。",
+        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {

@@ -22,8 +22,22 @@ impl Default for CommandConfig {
     fn default() -> Self {
         Self {
             allowlist: vec![
-                "cargo".into(), "rustc".into(), "make".into(),
-                "just".into(), "fmt".into(), "clippy".into(), "echo".into(),
+                // Rust
+                "cargo".into(), "rustc".into(),
+                // Java / JVM
+                "mvn".into(), "mvnw".into(), "gradle".into(), "gradlew".into(),
+                "java".into(), "javac".into(), "jar".into(),
+                // Node.js
+                "npm".into(), "npx".into(), "node".into(),
+                // Python
+                "python".into(), "pip".into(), "pip3".into(), "poetry".into(),
+                // Go
+                "go".into(), "gofmt".into(),
+                // .NET
+                "dotnet".into(),
+                // 通用
+                "make".into(), "just".into(), "fmt".into(),
+                "clippy".into(), "echo".into(),
             ],
             denylist: vec![
                 "rm".into(), "mv".into(), "cp".into(), "curl".into(),
@@ -71,9 +85,22 @@ impl Default for SummaryConfig {
     fn default() -> Self {
         Self {
             key_file_patterns: vec![
-                "Cargo.toml".into(), "package.json".into(), "go.mod".into(),
-                "pyproject.toml".into(), "README.md".into(), ".devnpc.md".into(),
-                ".gitlab-ci.yml".into(), "src/main.rs".into(), "src/lib.rs".into(),
+                // Rust
+                "Cargo.toml".into(), "src/main.rs".into(), "src/lib.rs".into(),
+                // Java / JVM
+                "pom.xml".into(), "build.gradle".into(), "build.gradle.kts".into(),
+                "settings.gradle".into(), "gradlew".into(), "mvnw".into(),
+                // Node.js
+                "package.json".into(), "package-lock.json".into(),
+                "yarn.lock".into(), "tsconfig.json".into(),
+                // Python
+                "pyproject.toml".into(), "requirements.txt".into(),
+                "setup.py".into(), "setup.cfg".into(),
+                // Go
+                "go.mod".into(), "go.sum".into(),
+                // 通用
+                "README.md".into(), ".devnpc.md".into(),
+                ".gitlab-ci.yml".into(),
                 "Makefile".into(), "justfile".into(),
             ],
             readme_lines: 30,

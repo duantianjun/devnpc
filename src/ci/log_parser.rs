@@ -1,9 +1,8 @@
 //! CI 日志解析器 (P4 完整实现)
 //!
-//! MVP 支持 Rust,识别:
-//! - 编译错误: error[E####]:
-//! - 测试失败: test ... FAILED / panicked at
-//! - Lint: warning:
+//! 识别常见 CI 失败模式:
+//! - 编译错误: error[E####]: / error: / FAILURE:
+//! - 测试失败: panicked at / FAILED / Tests failed
 //! - 超时: timed out / killed
 
 use serde::Deserialize;
@@ -31,7 +30,7 @@ pub struct ParsedFailure {
     pub context_lines: Vec<String>,
 }
 
-/// 解析日志 (MVP: Rust)
+/// 解析日志 (通用)
 pub fn parse_log(job_name: &str, log: &str) -> Vec<ParsedFailure> {
     parse_log_with_config(job_name, log, &LogParserConfig::default())
 }
