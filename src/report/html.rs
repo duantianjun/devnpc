@@ -48,6 +48,9 @@ pub fn generate_html(data: &ReportData) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // 工具调用分布统计
+    let tool_stats_rows: String = build_tool_stats_rows(&data.trajectory.events);
+
     let mr_section = if let Some(iid) = data.mr_iid {
         format!(
             r#"<div class="output-item">
@@ -323,6 +326,9 @@ pub fn generate_html(data: &ReportData) -> String {
     </div>
 </div>
 
+<!-- Tool Distribution -->
+{tool_stats_section}
+
 <!-- Output -->
 <div class="section">
     <h2>产出</h2>
@@ -353,6 +359,7 @@ pub fn generate_html(data: &ReportData) -> String {
         task_description = html_escape(&data.task_description),
         trajectory_len = data.trajectory.events.len(),
         trajectory_rows = trajectory_rows,
+        tool_stats_section = build_tool_stats_section(&tool_stats_rows),
         input_tokens = data.cost_estimate.input_tokens,
         output_tokens = data.cost_estimate.output_tokens,
         cost_usd = data.cost_estimate.estimated_cost_usd,
@@ -379,6 +386,92 @@ fn format_duration(secs: u64) -> String {
             secs % 60
         )
     }
+}
+
+/// 从轨迹事件中统计工具调用分布,生成表格行 HTML
+///
+/// detail 格式: "工具: {name}"
+fn build_tool_stats_rows(events: &[crate::report::collector::TrajectoryEventSummary]) -> String {
+    use std::collections::BTreeMap;
+
+    // (工具名, (总次数, 成功次数))
+    let mut stats: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+
+    for ev in events {
+        if ev.kind == "tool_call" {
+            // 从 detail 解析工具名: "工具: xxx" -> "xxx"
+            let name = ev.detail.strip_prefix("工具: ").unwrap_or(&ev.detail);
+            let entry = stats.entry(name).or_insert((0, 0));
+            entry.0 += 1;
+            if ev.success == Some(true) {
+                entry.1 += 1;
+            }
+        }
+    }
+
+    if stats.is_empty() {
+        return String::new();
+    }
+
+    // 按总次数降序排列
+    let mut sorted: Vec<_> = stats.into_iter().collect();
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1 .0));
+
+    sorted
+        .iter()
+        .map(|(name, (total, ok))| {
+            let fail = total - ok;
+            let rate = if *total > 0 {
+                (*ok as f64 / *total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let bar_width = rate.min(100.0);
+            format!(
+                r#"<tr>
+                    <td class="event-detail">{name}</td>
+                    <td style="text-align:right;font-family:var(--font-mono);">{total}</td>
+                    <td style="text-align:right;color:var(--color-success);font-family:var(--font-mono);">{ok}</td>
+                    <td style="text-align:right;color:var(--color-error);font-family:var(--font-mono);">{fail}</td>
+                    <td style="width:120px;">
+                        <div style="background:rgba(255,255,255,0.06);border-radius:3px;height:8px;overflow:hidden;">
+                            <div style="width:{bar_width:.0}%;height:100%;background:var(--color-success);border-radius:3px;"></div>
+                        </div>
+                    </td>
+                    <td style="text-align:right;font-family:var(--font-mono);font-size:0.8rem;">{rate:.0}%</td>
+                </tr>"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 生成工具调用分布 section (若无工具调用则返回空字符串)
+fn build_tool_stats_section(rows: &str) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<div class="section">
+    <h2>工具调用分布</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>工具</th>
+                <th style="text-align:right;">调用次数</th>
+                <th style="text-align:right;">成功</th>
+                <th style="text-align:right;">失败</th>
+                <th>成功率</th>
+                <th style="text-align:right;">%</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>
+</div>
+"#
+    )
 }
 
 /// 简单的 HTML 转义 (防止 XSS)
@@ -421,8 +514,18 @@ mod tests {
                     },
                     crate::report::collector::TrajectoryEventSummary {
                         kind: "tool_call".into(),
+                        detail: "工具: read_file".into(),
+                        success: Some(true),
+                    },
+                    crate::report::collector::TrajectoryEventSummary {
+                        kind: "tool_call".into(),
                         detail: "工具: write_file".into(),
                         success: Some(true),
+                    },
+                    crate::report::collector::TrajectoryEventSummary {
+                        kind: "tool_call".into(),
+                        detail: "工具: run_command".into(),
+                        success: Some(false),
                     },
                     crate::report::collector::TrajectoryEventSummary {
                         kind: "deviation".into(),
@@ -463,6 +566,38 @@ mod tests {
         assert!(html.contains("LLM 调用"));
         assert!(html.contains("read_file"));
         assert!(html.contains("SOP 偏离"));
+        // 工具调用分布 section
+        assert!(html.contains("工具调用分布"));
+        assert!(html.contains("run_command"));
+        assert!(html.contains("write_file"));
+    }
+
+    #[test]
+    fn tool_stats_section_empty_when_no_tool_calls() {
+        let data = ReportData {
+            trajectory: TrajectorySummary {
+                events: vec![crate::report::collector::TrajectoryEventSummary {
+                    kind: "llm_call".into(),
+                    detail: "LLM 调用 (iteration #0)".into(),
+                    success: Some(true),
+                }],
+            },
+            ..make_sample_data()
+        };
+        let html = generate_html(&data);
+        assert!(!html.contains("工具调用分布"));
+    }
+
+    #[test]
+    fn tool_stats_counts_match_events() {
+        // 样本: read_file x2 (全成功), write_file x1 (成功), run_command x1 (失败)
+        let data = make_sample_data();
+        let html = generate_html(&data);
+        assert!(html.contains("工具调用分布"));
+        // 工具行存在
+        assert!(html.contains("read_file"));
+        assert!(html.contains("write_file"));
+        assert!(html.contains("run_command"));
     }
 
     #[test]
@@ -494,7 +629,7 @@ mod tests {
     fn generate_html_displays_trajectory_count() {
         let data = make_sample_data();
         let html = generate_html(&data);
-        assert!(html.contains("4 个事件"));
+        assert!(html.contains("6 个事件"));
     }
 
     #[test]
