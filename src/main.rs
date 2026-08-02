@@ -179,8 +179,11 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         Vec::new(), // MCP 工具通过 toolset 添加到 Agent
     );
 
-    // 创建回调
-    let callbacks = DevnpcCallbacks::new();
+    // 创建回调 (注入 SOP 配置)
+    let callbacks = DevnpcCallbacks::new(
+        config.project.sop_mode,
+        config.project.forbidden_paths.clone(),
+    );
 
     // 构建主 Agent
     let agent = LlmAgentBuilder::new("devnpc")

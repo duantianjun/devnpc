@@ -498,7 +498,6 @@ fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize, lan
 }
 
 /// 符号信息
-#[allow(dead_code)]
 struct SymbolInfo {
     kind: String,
     name: String,

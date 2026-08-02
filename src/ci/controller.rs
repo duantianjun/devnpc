@@ -415,7 +415,13 @@ mod tests {
     #[async_trait]
     impl GitlabApi for MockGitlab {
         async fn get_issue(&self, _p: u64, _i: u64) -> Result<Issue> {
-            unimplemented!()
+            Ok(Issue {
+                iid: _i,
+                title: "Test Issue".into(),
+                description: Some("Test description".into()),
+                state: "opened".into(),
+                web_url: "https://gl.test/issues/1".into(),
+            })
         }
         async fn get_mr(&self, _p: u64, _i: u64) -> Result<MergeRequest> {
             Ok(MergeRequest {
@@ -430,7 +436,16 @@ mod tests {
             })
         }
         async fn create_mr(&self, _p: u64, _r: CreateMrReq) -> Result<MergeRequest> {
-            unimplemented!()
+            Ok(MergeRequest {
+                iid: 999,
+                title: _r.title,
+                description: Some(_r.description),
+                state: "opened".into(),
+                source_branch: _r.source_branch,
+                target_branch: _r.target_branch,
+                web_url: "https://gl.test/mrs/999".into(),
+                draft: _r.draft,
+            })
         }
         async fn get_pipelines(&self, _p: u64) -> Result<Vec<Pipeline>> {
             let count = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -463,10 +478,10 @@ mod tests {
             Ok(pipelines)
         }
         async fn get_issue_notes(&self, _p: u64, _i: u64) -> Result<Vec<Note>> {
-            unimplemented!()
+            Ok(vec![])
         }
         async fn get_mr_notes(&self, _p: u64, _i: u64) -> Result<Vec<Note>> {
-            unimplemented!()
+            Ok(vec![])
         }
         async fn create_mr_note(&self, _p: u64, _i: u64, _body: &str) -> Result<Note> {
             Ok(Note {
@@ -493,10 +508,20 @@ mod tests {
             })
         }
         async fn get_related_mrs(&self, _p: u64, _i: u64) -> Result<Vec<MergeRequest>> {
-            unimplemented!()
+            Ok(vec![])
         }
         async fn get_recent_pipelines(&self, _p: u64, _c: usize) -> Result<Vec<Pipeline>> {
-            unimplemented!()
+            Ok(self
+                .pipelines
+                .iter()
+                .map(|(id, status, ref_)| Pipeline {
+                    id: *id,
+                    status: status.clone(),
+                    ref_: Some(ref_.clone()),
+                    sha: Some("abc123".into()),
+                    web_url: format!("https://gl.test/pipelines/{id}"),
+                })
+                .collect())
         }
         async fn update_mr(&self, _p: u64, _i: u64, _t: &str, _d: bool) -> Result<MergeRequest> {
             Ok(MergeRequest {
@@ -662,43 +687,94 @@ mod tests {
         #[async_trait]
         impl GitlabApi for NeverTriggerMock {
             async fn get_issue(&self, _p: u64, _i: u64) -> Result<Issue> {
-                unimplemented!()
+                Ok(Issue {
+                    iid: _i,
+                    title: "Test Issue".into(),
+                    description: Some("Test description".into()),
+                    state: "opened".into(),
+                    web_url: "https://gl.test/issues/1".into(),
+                })
             }
             async fn get_mr(&self, _p: u64, _i: u64) -> Result<MergeRequest> {
-                unimplemented!()
+                Ok(MergeRequest {
+                    iid: _i,
+                    title: "Draft: feat: test".into(),
+                    description: None,
+                    state: "opened".into(),
+                    source_branch: "feat/test".into(),
+                    target_branch: "main".into(),
+                    web_url: "https://gl.test/mrs/1".into(),
+                    draft: true,
+                })
             }
             async fn create_mr(&self, _p: u64, _r: CreateMrReq) -> Result<MergeRequest> {
-                unimplemented!()
+                Ok(MergeRequest {
+                    iid: 999,
+                    title: _r.title,
+                    description: Some(_r.description),
+                    state: "opened".into(),
+                    source_branch: _r.source_branch,
+                    target_branch: _r.target_branch,
+                    web_url: "https://gl.test/mrs/999".into(),
+                    draft: _r.draft,
+                })
             }
             async fn get_pipelines(&self, _p: u64) -> Result<Vec<Pipeline>> {
                 Ok(vec![])
             }
             async fn get_issue_notes(&self, _p: u64, _i: u64) -> Result<Vec<Note>> {
-                unimplemented!()
+                Ok(vec![])
             }
             async fn get_mr_notes(&self, _p: u64, _i: u64) -> Result<Vec<Note>> {
-                unimplemented!()
+                Ok(vec![])
             }
             async fn create_mr_note(&self, _p: u64, _i: u64, _b: &str) -> Result<Note> {
-                unimplemented!()
+                Ok(Note {
+                    id: 1,
+                    body: _b.into(),
+                    author: NoteAuthor {
+                        id: 99,
+                        username: "devnpc".into(),
+                        name: "devnpc bot".into(),
+                    },
+                    created_at: "2026-08-01T00:00:00Z".into(),
+                })
             }
             async fn create_issue_note(&self, _p: u64, _i: u64, _b: &str) -> Result<Note> {
-                unimplemented!()
+                Ok(Note {
+                    id: 1,
+                    body: _b.into(),
+                    author: NoteAuthor {
+                        id: 99,
+                        username: "devnpc".into(),
+                        name: "devnpc bot".into(),
+                    },
+                    created_at: "2026-08-01T00:00:00Z".into(),
+                })
             }
             async fn get_related_mrs(&self, _p: u64, _i: u64) -> Result<Vec<MergeRequest>> {
-                unimplemented!()
+                Ok(vec![])
             }
             async fn get_recent_pipelines(&self, _p: u64, _c: usize) -> Result<Vec<Pipeline>> {
-                unimplemented!()
+                Ok(vec![])
             }
             async fn update_mr(&self, _p: u64, _i: u64, _t: &str, _d: bool) -> Result<MergeRequest> {
-                unimplemented!()
+                Ok(MergeRequest {
+                    iid: _i,
+                    title: _t.into(),
+                    description: None,
+                    state: "opened".into(),
+                    source_branch: "feat/test".into(),
+                    target_branch: "main".into(),
+                    web_url: "https://gl.test/mrs/1".into(),
+                    draft: _d,
+                })
             }
             async fn get_pipeline_jobs(&self, _p: u64, _pi: u64) -> Result<Vec<Job>> {
-                unimplemented!()
+                Ok(vec![])
             }
             async fn get_job_log(&self, _p: u64, _j: u64) -> Result<String> {
-                unimplemented!()
+                Ok(String::new())
             }
         }
 

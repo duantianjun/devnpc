@@ -214,7 +214,16 @@ mod tests {
             })
         }
         async fn create_mr(&self, _project_id: u64, _req: CreateMrReq) -> Result<MergeRequest> {
-            unimplemented!("mock")
+            Ok(MergeRequest {
+                iid: 100,
+                title: _req.title,
+                description: Some(_req.description),
+                state: "opened".into(),
+                source_branch: _req.source_branch,
+                target_branch: _req.target_branch,
+                web_url: "https://gl.test/mrs/100".into(),
+                draft: _req.draft,
+            })
         }
         async fn get_pipelines(&self, _project_id: u64) -> Result<Vec<Pipeline>> {
             Ok(self.pipelines.clone())
@@ -231,7 +240,16 @@ mod tests {
             _mr_iid: u64,
             _body: &str,
         ) -> Result<Note> {
-            unimplemented!("mock")
+            Ok(Note {
+                id: 1,
+                body: _body.into(),
+                author: NoteAuthor {
+                    id: 99,
+                    username: "devnpc".into(),
+                    name: "devnpc bot".into(),
+                },
+                created_at: "2026-08-01T00:00:00Z".into(),
+            })
         }
         async fn create_issue_note(
             &self,
@@ -239,7 +257,16 @@ mod tests {
             _issue_iid: u64,
             _body: &str,
         ) -> Result<Note> {
-            unimplemented!("mock")
+            Ok(Note {
+                id: 1,
+                body: _body.into(),
+                author: NoteAuthor {
+                    id: 99,
+                    username: "devnpc".into(),
+                    name: "devnpc bot".into(),
+                },
+                created_at: "2026-08-01T00:00:00Z".into(),
+            })
         }
         async fn get_related_mrs(
             &self,
@@ -256,13 +283,22 @@ mod tests {
             Ok(self.pipelines.clone())
         }
         async fn update_mr(&self, _project_id: u64, _mr_iid: u64, _title: &str, _draft: bool) -> Result<MergeRequest> {
-            unimplemented!("mock")
+            Ok(MergeRequest {
+                iid: _mr_iid,
+                title: _title.to_string(),
+                description: None,
+                state: "opened".into(),
+                source_branch: "feat/test".into(),
+                target_branch: "main".into(),
+                web_url: "https://gl.test/mrs/1".into(),
+                draft: _draft,
+            })
         }
         async fn get_pipeline_jobs(&self, _project_id: u64, _pipeline_id: u64) -> Result<Vec<crate::gitlab_api::Job>> {
-            unimplemented!("mock")
+            Ok(vec![])
         }
         async fn get_job_log(&self, _project_id: u64, _job_id: u64) -> Result<String> {
-            unimplemented!("mock")
+            Ok(String::new())
         }
     }
 

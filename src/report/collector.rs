@@ -126,7 +126,6 @@ impl Default for ReportData {
 
 /// 轨迹采集器
 pub struct TrajectoryCollector {
-    #[allow(dead_code)]
     events: Arc<Mutex<Vec<String>>>,
 }
 
@@ -135,6 +134,11 @@ impl TrajectoryCollector {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// 获取事件列表 (用于测试和报告生成)
+    pub fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 从 Agent Trajectory 生成报告数据
@@ -350,7 +354,7 @@ mod tests {
         traj.record_llm_call(0);
         traj.record_tool_call("read_file", true);
         let collector = TrajectoryCollector::from_trajectory(&traj);
-        let events = collector.events.lock().unwrap();
+        let events = collector.events();
         assert_eq!(events.len(), 2);
     }
 }
