@@ -737,10 +737,32 @@ async fn run_ci_controller(
     orchestrator: Arc<devnpc::adapter::orchestrator::Orchestrator>,
 ) -> Result<CiOutcome> {
     // 创建 MR (如果当前没有关联 MR)
+    // title 截断到 GitLab 限制内 (255 字符),优先使用首行非空文本
+    let mr_title = {
+        let prefix = "devnpc: ";
+        let max_len = 255usize.saturating_sub(prefix.len());
+        // 提取首行非空文本作为标题
+        let first_line = summary
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty())
+            .unwrap_or(summary.trim());
+        // 去除可能的 markdown 标记
+        let clean = first_line.trim_start_matches('#').trim();
+        let clean = if clean.is_empty() { first_line } else { clean };
+        // 截断到最大长度
+        let truncated = if clean.chars().count() > max_len {
+            let chars: Vec<char> = clean.chars().take(max_len - 3).collect();
+            format!("{}...", chars.into_iter().collect::<String>())
+        } else {
+            clean.to_string()
+        };
+        format!("{prefix}{truncated}")
+    };
     let create_req = devnpc::gitlab_api::CreateMrReq {
         source_branch: branch.to_string(),
         target_branch: config.project.target_branch.clone(),
-        title: format!("devnpc: {}", summary),
+        title: mr_title,
         description: format!("由 devnpc 自动创建的 MR\n\n## 摘要\n{}", summary),
         draft: true,
     };

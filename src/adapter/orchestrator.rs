@@ -466,9 +466,10 @@ impl Orchestrator {
                     if !event.llm_response.partial {
                         self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
                     }
-                    if event.is_final_response()
-                        && let Some(content) = &event.llm_response.content
-                    {
+                    // 累积文本: 同时处理 partial 和 final 事件中的文本内容
+                    // (DeepSeek 流式响应中,文本通过 partial 事件分块发出,
+                    //  最终事件可能 content=None,只携带 finish_reason)
+                    if let Some(content) = &event.llm_response.content {
                         for part in &content.parts {
                             if let Some(text) = part.text() {
                                 result.push_str(text);
@@ -539,9 +540,10 @@ impl Orchestrator {
                     if !event.llm_response.partial {
                         self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
                     }
-                    if event.is_final_response()
-                        && let Some(content) = &event.llm_response.content
-                    {
+                    // 累积文本: 同时处理 partial 和 final 事件
+                    // (DeepSeek 流式响应中,文本通过 partial 事件分块发出,
+                    //  最终事件可能 content=None,只携带 finish_reason)
+                    if let Some(content) = &event.llm_response.content {
                         for part in &content.parts {
                             if let Some(text) = part.text() {
                                 final_text.push_str(text);
