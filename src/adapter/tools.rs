@@ -599,7 +599,7 @@ fn find_symbol_node<'a>(
     None
 }
 
-/// 递归收集源码文件 (.rs / .java / .py / .js / .ts / .go / .c / .cpp ...)
+/// 递归收集源码文件 (与 detect_language 支持的 13 种语言一致)
 fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize) {
     if depth > 10 {
         return;
@@ -616,45 +616,48 @@ fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize)
             }
             collect_source_files(&path, results, depth + 1);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
-            && matches!(ext, "rs" | "java" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "c" | "h" | "cpp" | "hpp" | "cc" | "cxx") {
-                results.push(path);
-            }
+            && matches!(
+                ext,
+                "rs" | "java" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "c" | "h"
+                    | "cpp" | "hpp" | "cc" | "cxx" | "rb" | "php" | "swift" | "kt" | "kts"
+            ) {
+            results.push(path);
+        }
     }
 }
 
-/// 从文件路径检测语言并解析,返回 (tree, lang)
-fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Language), adk_rust::AdkError> {
+/// 从文件路径检测语言并解析,返回 (tree, lang, source)
+///
+/// 同时返回源码字符串,避免调用方重复读取文件 (IO 优化)。
+fn parse_file(
+    file_io: &FileIo,
+    path: &str,
+) -> Result<(tree_sitter::Tree, Language, String), adk_rust::AdkError> {
     let full = file_io.validate_path(path).map_err(|e| {
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
     })?;
     let lang = detect_language(&full).ok_or_else(|| {
-        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx: {path}"))
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts: {path}"))
     })?;
     let source = std::fs::read_to_string(&full).map_err(|e| {
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
     })?;
     let tree = parse_source(&source, lang)?;
-    Ok((tree, lang))
+    Ok((tree, lang, source))
 }
 
 /// aft_outline: 列出文件的所有顶层符号 (多语言)
 fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_outline",
-        "列出源码文件的所有顶层符号,返回符号名+行号范围。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
+        "列出源码文件的所有顶层符号,返回符号名+行号范围。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
                 let path = args["path"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 path 参数")
                 })?;
-                let (tree, lang) = parse_file(&file_io, path)?;
-                let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
-                })?;
-                let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
-                })?;
+                let (tree, lang, source) = parse_file(&file_io, path)?;
                 let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, lang);
                 if symbols.is_empty() {
                     return Ok(serde_json::json!({ "output": "(无顶层符号)" }));
@@ -676,7 +679,7 @@ fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_view_symbol",
-        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
+        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -686,13 +689,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
                 let symbol = args["symbol"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 symbol 参数")
                 })?;
-                let (tree, lang) = parse_file(&file_io, path)?;
-                let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
-                })?;
-                let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
-                })?;
+                let (tree, lang, source) = parse_file(&file_io, path)?;
                 let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, lang)
                     .ok_or_else(|| {
                         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
@@ -710,7 +707,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_edit_symbol",
-        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
+        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -723,13 +720,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
                 let new_content = args["content"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 content 参数")
                 })?;
-                let (tree, lang) = parse_file(&file_io, path)?;
-                let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
-                })?;
-                let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
-                })?;
+                let (tree, lang, source) = parse_file(&file_io, path)?;
                 let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, lang)
                     .ok_or_else(|| {
                         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
@@ -750,6 +741,10 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
                     }));
                 }
 
+                // 写文件需要绝对路径,重新验证一次 (parse_file 内部已验证,此处复用)
+                let full = file_io.validate_path(path).map_err(|e| {
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
+                })?;
                 std::fs::write(&full, &new_source).map_err(|e| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("写入文件失败: {e}"))
                 })?;
@@ -826,7 +821,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_ast_replace",
-        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx。",
+        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -848,13 +843,7 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT",format!("无效正则: {e}"))
                 })?;
 
-                let (_tree, lang) = parse_file(&file_io, path)?;
-                let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
-                })?;
-                let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
-                })?;
+                let (_tree, lang, source) = parse_file(&file_io, path)?;
 
                 let new_source = regex.replace_all(&source, replacement).to_string();
                 if new_source == source {
@@ -870,6 +859,10 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
                     }));
                 }
 
+                // 写文件需要绝对路径,重新验证一次 (parse_file 内部已验证,此处复用)
+                let full = file_io.validate_path(path).map_err(|e| {
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
+                })?;
                 std::fs::write(&full, &new_source).map_err(|e| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("写入文件失败: {e}"))
                 })?;
@@ -1037,6 +1030,37 @@ mod tests {
         let mut results = Vec::new();
         collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
         assert!(results.is_empty(), "深度 > 10 的文件不应被收集,实际: {:?}", results);
+    }
+
+    #[test]
+    fn collect_source_files_includes_new_language_extensions() {
+        // 回归测试: 确保扩展后支持 Ruby/PHP/Swift/Kotlin 扩展名
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        fs::write(dir.path().join("b.java"), "class B {}").unwrap();
+        fs::write(dir.path().join("c.rb"), "def c; end").unwrap();
+        fs::write(dir.path().join("d.php"), "<?php function d() {}").unwrap();
+        fs::write(dir.path().join("e.swift"), "func e() {}").unwrap();
+        fs::write(dir.path().join("f.kt"), "fun f() {}").unwrap();
+        fs::write(dir.path().join("g.kts"), "fun g() {}").unwrap();
+        // 非源码文件应被忽略
+        fs::write(dir.path().join("h.txt"), "not source").unwrap();
+        fs::write(dir.path().join("i.md"), "# doc").unwrap();
+
+        let mut results = Vec::new();
+        collect_source_files(&dir.path().to_path_buf(), &mut results, 0);
+        let exts: Vec<String> = results
+            .iter()
+            .filter_map(|p| p.extension().and_then(|e| e.to_str()).map(String::from))
+            .collect();
+        // 应收集 7 个源码文件 (rs/java/rb/php/swift/kt/kts)
+        assert_eq!(results.len(), 7, "应收集 7 个源码文件,实际: {:?}", exts);
+        for ext in &["rs", "java", "rb", "php", "swift", "kt", "kts"] {
+            assert!(
+                exts.iter().any(|e| e == ext),
+                "应包含 .{ext} 文件,实际: {exts:?}"
+            );
+        }
     }
 
     #[test]
