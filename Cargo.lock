@@ -1288,6 +1288,8 @@ dependencies = [
  "mockall",
  "regex",
  "reqwest",
+ "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

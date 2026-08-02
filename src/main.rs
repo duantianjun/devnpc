@@ -1,16 +1,12 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use futures::StreamExt;
 
 use adk_rust::agent::LlmAgentBuilder;
-use adk_rust::runner::Runner;
-use adk_rust::session::CreateRequest;
-use adk_rust::{Content, SessionId, UserId};
 
 use devnpc::adapter::callbacks::DevnpcCallbacks;
 use devnpc::adapter::context::{build_initial_state, create_session_service};
-use devnpc::adapter::provider::create_model;
+use devnpc::adapter::provider::{create_complex_model, create_model, create_simple_model};
 use devnpc::adapter::tools::create_all_tools;
 use devnpc::ci::controller::{CiController, CiOutcome, FixHandler};
 use devnpc::ci::log_parser::ParsedFailure;
@@ -117,6 +113,23 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
+    // 3.5 初始化 MCP Gateway
+    let mcp_gateway = if config.mcp.enabled {
+        let gateway = devnpc::adapter::mcp_gateway::McpGateway::new(config.mcp.clone());
+        // 启动 codemap
+        if let Err(e) = gateway.start_codemap().await {
+            tracing::warn!(error = %e, "codemap 启动失败");
+        }
+        // 连接所有 MCP 服务器
+        if let Err(e) = gateway.connect_all().await {
+            tracing::warn!(error = %e, "MCP 服务器连接失败");
+        }
+        tracing::info!("MCP Gateway 已启用");
+        Some(gateway)
+    } else {
+        None
+    };
+
     // 4. 解析触发源
     let trigger = parse_trigger(task, &*gitlab, config.gitlab.project_id).await?;
     tracing::info!(?trigger, "触发源解析结果");
@@ -143,110 +156,91 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         None
     };
 
-    // 6. 创建 LlmAgent 并执行
+    // 6. 创建 Orchestrator 并执行
     let start_time = chrono::Utc::now();
 
     // 创建模型
     let model = create_model(&config.llm)?;
+
+    // 收集 MCP 工具集
+    let mcp_toolsets = if let Some(ref gateway) = mcp_gateway {
+        let toolsets = gateway.take_toolsets().await;
+        tracing::info!(count = toolsets.len(), "MCP 工具集已就绪");
+        toolsets
+    } else {
+        Vec::new()
+    };
 
     // 创建工具
     let tools = create_all_tools(
         &config,
         Some(gitlab.clone()),
         Some(config.gitlab.project_id),
+        Vec::new(), // MCP 工具通过 toolset 添加到 Agent
     );
 
     // 创建回调
     let callbacks = DevnpcCallbacks::new();
 
-    // 构建 Agent
+    // 构建主 Agent
     let agent = LlmAgentBuilder::new("devnpc")
         .instruction(SYSTEM_INSTRUCTION)
-        .model(model)
+        .model(model.clone())
         .before_tool_callback(callbacks.before_tool_callback())
         .after_model_callback(callbacks.after_model_callback());
 
-    // 逐个添加工具
     let agent = tools.into_iter().fold(agent, |builder, tool| {
         builder.tool(tool)
+    });
+
+    let agent = mcp_toolsets.into_iter().fold(agent, |builder, toolset| {
+        builder.toolset(toolset)
     });
 
     let agent = agent.build().map_err(|e| {
         devnpc::error::DevnpcError::Config(format!("Agent 构建失败: {e}"))
     })?;
 
+    // 创建模型路由
+    let simple_model = create_simple_model(&config)?;
+    let complex_model = create_complex_model(&config)?;
+
+    // 初始化长期记忆
+    let memory_store = if config.memory.enabled {
+        let store = devnpc::adapter::memory::MemoryStore::new(config.memory.clone());
+        if let Err(e) = store.initialize() {
+            tracing::warn!(error = %e, "记忆存储初始化失败");
+        }
+        tracing::info!("长期记忆系统已启用");
+        Some(store)
+    } else {
+        None
+    };
+
+    // 构建子 Agent (预留，后续扩展)
+    let code_agent = None;
+    let fix_agent = None;
+    let review_agent = None;
+
+    // 创建 Orchestrator
+    let orchestrator = Arc::new(devnpc::adapter::orchestrator::Orchestrator::new(
+        Arc::new(agent),
+        code_agent,
+        fix_agent,
+        review_agent,
+        Some(simple_model),
+        Some(complex_model),
+        memory_store,
+    ));
+
     // 创建 SessionService 和初始状态
     let (session_service, session_id) = create_session_service();
     let initial_state = context.as_ref().map(build_initial_state).unwrap_or_default();
 
-    // 创建会话
-    session_service
-        .create(CreateRequest {
-            app_name: "devnpc".to_string(),
-            user_id: "devnpc".to_string(),
-            session_id: Some(session_id.clone()),
-            state: initial_state,
-        })
-        .await
-        .map_err(|e| devnpc::error::DevnpcError::Config(format!("会话创建失败: {e}")))?;
-
-    // 创建 Runner
-    let runner = Runner::builder()
-        .app_name("devnpc")
-        .agent(Arc::new(agent))
-        .session_service(session_service)
-        .build()
-        .map_err(|e| devnpc::error::DevnpcError::Config(format!("Runner 构建失败: {e}")))?;
-
     // 执行 Agent
-    let content = Content::new("user").with_text(&task_spec.description);
-    let user_id = UserId::new("devnpc").map_err(|e| {
-        devnpc::error::DevnpcError::Config(format!("UserId 创建失败: {e}"))
-    })?;
-    let session_id_typed = SessionId::try_from(session_id.as_str()).map_err(|e| {
-        devnpc::error::DevnpcError::Config(format!("SessionId 创建失败: {e}"))
-    })?;
-    let mut stream = runner
-        .run(user_id, session_id_typed, content)
-        .await
-        .map_err(|e| devnpc::error::DevnpcError::Config(format!("Agent 执行失败: {e}")))?;
-
-    // 收集执行结果
-    let mut trajectory = Trajectory::new();
-    let mut final_text = String::new();
-
-    while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(event) => {
-                // 记录 LLM 调用 (只要有 content 就算一次调用)
-                if event.llm_response.content.is_some() {
-                    trajectory.record_llm_call(trajectory.events.len());
-                }
-
-                // 记录工具调用 (通过 content 中的 FunctionCall 判断)
-                if let Some(content) = &event.llm_response.content {
-                    let has_tool_call = content.parts.iter().any(|part| {
-                        matches!(part, adk_rust::Part::FunctionCall { .. })
-                    });
-                    if has_tool_call {
-                        trajectory.record_tool_call("unknown", true);
-                    }
-                }
-
-                // 收集最终响应文本
-                if event.is_final_response() && let Some(content) = &event.llm_response.content {
-                    for part in &content.parts {
-                        if let Some(text) = part.text() {
-                            final_text.push_str(text);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Agent 事件流错误");
-            }
-        }
-    }
+    let final_text = orchestrator
+        .run(&task_spec.description, session_service, &session_id, initial_state)
+        .await?;
 
     let end_time = chrono::Utc::now();
     let summary = if final_text.is_empty() {
@@ -266,10 +260,12 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         &summary,
         mr_iid,
         &context,
+        orchestrator.clone(),
     )
     .await?;
 
     // 8. 生成报告并发布
+    let trajectory = Trajectory::new();
     let report_data = build_report(
         &trajectory,
         &summary,
@@ -354,13 +350,15 @@ async fn parse_trigger(
     Ok(Trigger::None)
 }
 
-/// 无操作修复处理器 (CI 闭环暂未接入真实修复 agent 时的占位)
-struct NoopFixHandler;
+/// 修复处理器: 使用 Orchestrator 的 Fix Agent
+struct FixHandlerImpl {
+    orchestrator: Arc<devnpc::adapter::orchestrator::Orchestrator>,
+}
 
 #[async_trait::async_trait]
-impl FixHandler for NoopFixHandler {
-    async fn run_fix(&self, _failures: &[ParsedFailure], _instruction: &str) -> Result<String> {
-        Ok("noop fix".into())
+impl FixHandler for FixHandlerImpl {
+    async fn run_fix(&self, _failures: &[ParsedFailure], instruction: &str) -> Result<String> {
+        self.orchestrator.run_fix_agent(instruction).await
     }
 }
 
@@ -372,6 +370,7 @@ async fn run_ci_controller(
     summary: &str,
     _mr_iid: Option<u64>,
     _context: &Option<Context>,
+    orchestrator: Arc<devnpc::adapter::orchestrator::Orchestrator>,
 ) -> Result<CiOutcome> {
     // 创建 MR (如果当前没有关联 MR)
     let create_req = devnpc::gitlab_api::CreateMrReq {
@@ -394,7 +393,9 @@ async fn run_ci_controller(
                 Box::new(GitlabClient::new(&config.gitlab.url, &config.gitlab.token)),
                 git_ops,
                 config.gitlab.project_id,
-                Box::new(NoopFixHandler),
+                Box::new(FixHandlerImpl {
+                    orchestrator: orchestrator.clone(),
+                }),
             );
             match controller.run(mr.iid, branch).await {
                 Ok(outcome) => {
