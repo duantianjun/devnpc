@@ -67,6 +67,21 @@ pub struct ReportData {
     pub pipeline_id: Option<u64>,
     pub started_at: String,
     pub finished_at: String,
+    /// Team 协作流程步骤 (仅在 Team 编排模式下填充)
+    pub team_steps: Vec<TeamStepSummary>,
+}
+
+/// Team 协作步骤摘要 (供 HTML 渲染)
+#[derive(Debug, Clone, Default)]
+pub struct TeamStepSummary {
+    /// 角色名 (pm/developer/tester)
+    pub role: String,
+    /// 输入指令
+    pub instruction: String,
+    /// Agent 输出
+    pub output: String,
+    /// 检测到的信号 (decomposed/implemented 等)
+    pub signals: Vec<String>,
 }
 
 /// 轨迹摘要 (供 HTML 渲染)
@@ -120,6 +135,7 @@ impl Default for ReportData {
             pipeline_id: None,
             started_at: Utc::now().to_rfc3339(),
             finished_at: Utc::now().to_rfc3339(),
+            team_steps: Vec::new(),
         }
     }
 }
@@ -275,6 +291,7 @@ impl TrajectoryCollector {
             pipeline_id,
             started_at: start_time.to_rfc3339(),
             finished_at: end_time.to_rfc3339(),
+            team_steps: Vec::new(),
         }
     }
 }

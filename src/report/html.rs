@@ -88,6 +88,65 @@ pub fn generate_html(data: &ReportData) -> String {
         )
     }).unwrap_or_default();
 
+    // Team 协作流程可视化 (仅在 Team 模式下渲染)
+    let team_section = if data.team_steps.is_empty() {
+        String::new()
+    } else {
+        let steps_html: String = data
+            .team_steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let signals_html = if step.signals.is_empty() {
+                    String::new()
+                } else {
+                    let sigs: Vec<String> = step
+                        .signals
+                        .iter()
+                        .map(|s| format!(r#"<span class="signal-badge">{s}</span>"#))
+                        .collect();
+                    format!(r#"<div class="team-signals">{}</div>"#, sigs.join(""))
+                };
+                let role_icon = match step.role.as_str() {
+                    "pm" => "&#128203;",
+                    "developer" | "dev" => "&#128187;",
+                    "tester" | "test" => "&#9989;",
+                    _ => "&#9679;",
+                };
+                format!(
+                    r#"<div class="team-step">
+                        <div class="team-step-header">
+                            <span class="team-step-icon">{role_icon}</span>
+                            <span class="team-step-role">{}</span>
+                            <span class="team-step-idx">步骤 {}</span>
+                        </div>
+                        <div class="team-step-instruction">指令: {}</div>
+                        <div class="team-step-output">{}</div>
+                        {signals_html}
+                    </div>"#,
+                    html_escape(&step.role),
+                    i + 1,
+                    html_escape(&step.instruction),
+                    html_escape(&step.output),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            r#"
+<!-- Team Collaboration -->
+<div class="section">
+    <h2>Team 协作流程 <span style="font-size:0.8rem;color:var(--color-text-secondary);font-weight:normal;">({} 个步骤)</span></h2>
+    <div class="team-timeline">
+        {steps_html}
+    </div>
+</div>
+"#,
+            data.team_steps.len()
+        )
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="zh">
@@ -165,6 +224,22 @@ pub fn generate_html(data: &ReportData) -> String {
     a {{ color: var(--color-accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
     .footer {{ margin-top: 2rem; text-align: center; color: var(--color-text-secondary); font-size: 0.8rem; }}
+    .team-timeline {{ display: flex; flex-direction: column; gap: 0.8rem; }}
+    .team-step {{
+        background: rgba(255,255,255,0.03); border: 1px solid var(--color-border);
+        border-radius: 6px; padding: 0.8rem; border-left: 3px solid var(--color-accent);
+    }}
+    .team-step-header {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }}
+    .team-step-icon {{ font-size: 1.1rem; }}
+    .team-step-role {{ font-weight: 600; color: var(--color-accent); text-transform: uppercase; font-size: 0.85rem; }}
+    .team-step-idx {{ color: var(--color-text-secondary); font-size: 0.75rem; margin-left: auto; }}
+    .team-step-instruction {{ font-size: 0.8rem; color: var(--color-text-secondary); margin-bottom: 0.4rem; font-family: var(--font-mono); }}
+    .team-step-output {{ font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap; }}
+    .team-signals {{ margin-top: 0.4rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }}
+    .signal-badge {{
+        background: rgba(63,185,80,0.15); color: var(--color-success);
+        padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 500;
+    }}
 </style>
 </head>
 <body>
@@ -211,7 +286,7 @@ pub fn generate_html(data: &ReportData) -> String {
     <h2>任务</h2>
     <div class="task-block">{task_description}</div>
 </div>
-
+{team_section}
 <!-- Trajectory Timeline -->
 <div class="section">
     <h2>执行轨迹 <span style="font-size:0.8rem;color:var(--color-text-secondary);font-weight:normal;">({trajectory_len} 个事件)</span></h2>
@@ -285,6 +360,7 @@ pub fn generate_html(data: &ReportData) -> String {
         pipeline_section = pipeline_section,
         mr_url_section = mr_url_section,
         ci_url_section = ci_url_section,
+        team_section = team_section,
         summary = html_escape(&data.summary),
     )
 }
@@ -364,6 +440,7 @@ mod tests {
             pipeline_id: Some(100),
             started_at: "2026-08-01T10:00:00Z".into(),
             finished_at: "2026-08-01T10:02:05Z".into(),
+            team_steps: Vec::new(),
         }
     }
 

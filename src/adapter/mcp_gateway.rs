@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use adk_rust::tool::{McpAuth, McpHttpClientBuilder, McpToolset};
 use adk_rust::Toolset;
 use rmcp::{ServiceExt, transport::TokioChildProcess};
@@ -248,6 +250,158 @@ impl McpGateway {
 
         Ok(())
     }
+
+    /// 从 YAML 配置文件加载 MCP 服务器
+    ///
+    /// 扫描 `mcp_servers_dir` 下的所有 `.yml` 文件,解析为 `McpServerDesc` 并注册。
+    /// YAML 格式见 `npc-config/mcp-servers/codemap.yml`。
+    /// 支持环境变量展开: `${ENV_VAR}` 会被替换为对应的环境变量值。
+    pub async fn load_from_yaml(&self, mcp_servers_dir: &std::path::Path) -> Result<usize> {
+        if !self.config.enabled {
+            return Ok(0);
+        }
+
+        if !mcp_servers_dir.exists() {
+            tracing::debug!(dir = %mcp_servers_dir.display(), "MCP 服务器配置目录不存在,跳过加载");
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        let entries = std::fs::read_dir(mcp_servers_dir).map_err(|e| {
+            crate::error::DevnpcError::Config(format!(
+                "读取 MCP 配置目录失败 ({}): {e}",
+                mcp_servers_dir.display()
+            ))
+        })?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), error = %e, "读取 MCP 配置文件失败,跳过");
+                    continue;
+                }
+            };
+
+            // YAML 文件格式为列表 (数组),每个元素是一个服务器配置
+            let servers: Vec<YamlMcpServer> = match serde_yaml::from_str(&content) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), error = %e, "解析 MCP 配置 YAML 失败,跳过");
+                    continue;
+                }
+            };
+
+            for srv in servers {
+                let desc = srv.to_mcp_server_desc();
+                tracing::info!(name = %desc.name, file = %path.display(), "从 YAML 加载 MCP 服务器");
+                self.register_server(desc).await;
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            tracing::info!(count = count, "从 YAML 配置加载 MCP 服务器完成");
+        }
+
+        Ok(count)
+    }
+}
+
+/// YAML 格式的 MCP 服务器配置 (用于反序列化)
+#[derive(Debug, Clone, Deserialize)]
+struct YamlMcpServer {
+    name: String,
+    /// "stdio" 或 "http"
+    transport: String,
+    /// stdio: 命令名
+    command: Option<String>,
+    /// stdio: 命令参数
+    args: Option<Vec<String>>,
+    /// http: 服务器 URL
+    url: Option<String>,
+    /// http: Bearer token (支持 ${ENV_VAR} 展开)
+    bearer_token: Option<String>,
+    /// http: API Key 认证
+    api_key: Option<YamlApiKey>,
+    /// http: 连接超时 (秒)
+    timeout_secs: Option<u64>,
+}
+
+/// YAML 格式的 API Key 认证
+#[derive(Debug, Clone, Deserialize)]
+struct YamlApiKey {
+    /// Header 名称 (如 "X-API-Key")
+    header: String,
+    /// Key 值 (支持 ${ENV_VAR} 展开)
+    key: String,
+}
+
+impl YamlMcpServer {
+    /// 转换为 McpServerDesc,支持环境变量展开
+    fn to_mcp_server_desc(&self) -> McpServerDesc {
+        let mut desc = match self.transport.as_str() {
+            "stdio" => {
+                let cmd = self.command.clone().unwrap_or_default();
+                let args = self.args.clone().unwrap_or_default();
+                McpServerDesc::stdio(self.name.clone(), cmd, args)
+            }
+            "http" => {
+                let url = self.url.clone().unwrap_or_default();
+                McpServerDesc::http(self.name.clone(), url)
+            }
+            _ => {
+                tracing::warn!(transport = %self.transport, name = %self.name, "未知传输方式,默认使用 stdio");
+                McpServerDesc::stdio(
+                    self.name.clone(),
+                    self.command.clone().unwrap_or_default(),
+                    self.args.clone().unwrap_or_default(),
+                )
+            }
+        };
+
+        // Bearer token (展开环境变量)
+        if let Some(token) = &self.bearer_token {
+            let expanded = expand_env_vars(token);
+            desc = desc.with_bearer(expanded);
+        }
+
+        // API Key 认证 (展开环境变量)
+        if let Some(api_key) = &self.api_key {
+            let header_expanded = expand_env_vars(&api_key.header);
+            let key_expanded = expand_env_vars(&api_key.key);
+            desc = desc.with_api_key(header_expanded, key_expanded);
+        }
+
+        // 超时
+        if let Some(secs) = self.timeout_secs {
+            desc = desc.with_timeout(secs);
+        }
+
+        desc
+    }
+}
+
+/// 展开字符串中的 `${ENV_VAR}` 为环境变量值
+///
+/// 若环境变量未设置,替换为空字符串。
+fn expand_env_vars(s: &str) -> String {
+    let mut result = s.to_string();
+    while let Some(start) = result.find("${") {
+        if let Some(end) = result[start..].find('}') {
+            let var_name = &result[start + 2..start + end];
+            let value = std::env::var(var_name).unwrap_or_default();
+            result = format!("{}{}{}", &result[..start], value, &result[start + end + 1..]);
+        } else {
+            break; // 无匹配的 },停止
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -328,5 +482,149 @@ mod tests {
         gateway.connect_all().await.unwrap();
         let toolsets = gateway.take_toolsets().await;
         assert!(toolsets.is_empty());
+    }
+
+    #[test]
+    fn test_expand_env_vars_no_vars() {
+        let result = expand_env_vars("plain-string");
+        assert_eq!(result, "plain-string");
+    }
+
+    #[test]
+    fn test_expand_env_vars_with_var() {
+        // SAFETY: 测试串行执行,不与其他线程共享此环境变量。
+        unsafe {
+            std::env::set_var("TEST_MCP_TOKEN", "secret123");
+        }
+        let result = expand_env_vars("Bearer ${TEST_MCP_TOKEN}");
+        assert_eq!(result, "Bearer secret123");
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("TEST_MCP_TOKEN");
+        }
+    }
+
+    #[test]
+    fn test_expand_env_vars_unset_var() {
+        let result = expand_env_vars("${UNDEFINED_VAR_12345}");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_expand_env_vars_multiple_vars() {
+        // SAFETY: 测试串行执行,不与其他线程共享这些环境变量。
+        unsafe {
+            std::env::set_var("TEST_VAR_A", "value_a");
+            std::env::set_var("TEST_VAR_B", "value_b");
+        }
+        let result = expand_env_vars("${TEST_VAR_A}-${TEST_VAR_B}");
+        assert_eq!(result, "value_a-value_b");
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("TEST_VAR_A");
+            std::env::remove_var("TEST_VAR_B");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_from_yaml_disabled_gateway() {
+        let config = McpConfig {
+            enabled: false,
+            codemap_path: "codemap".into(),
+            codemap_data_dir: ".codemap".into(),
+        };
+        let gateway = McpGateway::new(config);
+        let dir = std::path::Path::new("npc-config/mcp-servers");
+        let count = gateway.load_from_yaml(dir).await.unwrap();
+        assert_eq!(count, 0, "禁用的 Gateway 不应加载任何服务器");
+    }
+
+    #[tokio::test]
+    async fn test_load_from_yaml_nonexistent_dir() {
+        let config = McpConfig {
+            enabled: true,
+            codemap_path: "codemap".into(),
+            codemap_data_dir: ".codemap".into(),
+        };
+        let gateway = McpGateway::new(config);
+        let dir = std::path::Path::new("nonexistent-dir-12345");
+        let count = gateway.load_from_yaml(dir).await.unwrap();
+        assert_eq!(count, 0, "不存在的目录应返回 0");
+    }
+
+    #[tokio::test]
+    async fn test_yaml_mcp_server_to_desc_stdio() {
+        let srv = YamlMcpServer {
+            name: "test-stdio".into(),
+            transport: "stdio".into(),
+            command: Some("my-tool".into()),
+            args: Some(vec!["--port".into(), "8080".into()]),
+            url: None,
+            bearer_token: None,
+            api_key: None,
+            timeout_secs: None,
+        };
+        let desc = srv.to_mcp_server_desc();
+        assert_eq!(desc.name, "test-stdio");
+        assert_eq!(desc.transport, "stdio");
+        assert_eq!(desc.command.as_deref(), Some("my-tool"));
+        assert_eq!(desc.args, vec!["--port".to_string(), "8080".to_string()]);
+        assert!(desc.url.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_yaml_mcp_server_to_desc_http_with_auth() {
+        // SAFETY: 测试串行执行,不与其他线程共享此环境变量。
+        unsafe {
+            std::env::set_var("TEST_YAML_TOKEN", "tok-abc");
+        }
+        let srv = YamlMcpServer {
+            name: "test-http".into(),
+            transport: "http".into(),
+            command: None,
+            args: None,
+            url: Some("https://mcp.example.com/sse".into()),
+            bearer_token: Some("${TEST_YAML_TOKEN}".into()),
+            api_key: None,
+            timeout_secs: Some(45),
+        };
+        let desc = srv.to_mcp_server_desc();
+        assert_eq!(desc.name, "test-http");
+        assert_eq!(desc.transport, "http");
+        assert_eq!(desc.url.as_deref(), Some("https://mcp.example.com/sse"));
+        assert!(desc.auth.is_configured());
+        assert_eq!(desc.timeout_secs, Some(45));
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("TEST_YAML_TOKEN");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_yaml_mcp_server_to_desc_http_with_api_key() {
+        // SAFETY: 测试串行执行,不与其他线程共享此环境变量。
+        unsafe {
+            std::env::set_var("TEST_API_KEY_VAL", "key-secret");
+        }
+        let srv = YamlMcpServer {
+            name: "test-apikey".into(),
+            transport: "http".into(),
+            command: None,
+            args: None,
+            url: Some("https://mcp.example.com/api".into()),
+            bearer_token: None,
+            api_key: Some(YamlApiKey {
+                header: "X-API-Key".into(),
+                key: "${TEST_API_KEY_VAL}".into(),
+            }),
+            timeout_secs: None,
+        };
+        let desc = srv.to_mcp_server_desc();
+        assert_eq!(desc.name, "test-apikey");
+        assert!(desc.auth.is_configured());
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("TEST_API_KEY_VAL");
+        }
     }
 }

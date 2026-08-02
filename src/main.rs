@@ -118,9 +118,16 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     // 3.5 初始化 MCP Gateway
     let mcp_gateway = if config.mcp.enabled {
         let gateway = devnpc::adapter::mcp_gateway::McpGateway::new(config.mcp.clone());
-        // 启动 codemap
+        // 启动 codemap (硬编码的内置服务器)
         if let Err(e) = gateway.start_codemap().await {
             tracing::warn!(error = %e, "codemap 启动失败");
+        }
+        // 从 YAML 配置加载 MCP 服务器 (npc-config/mcp-servers/*.yml)
+        if config.npc_config.enabled {
+            let mcp_dir = std::path::Path::new(&config.npc_config.base_dir).join("mcp-servers");
+            if let Err(e) = gateway.load_from_yaml(&mcp_dir).await {
+                tracing::warn!(error = %e, "从 YAML 加载 MCP 服务器失败");
+            }
         }
         // 连接所有 MCP 服务器
         if let Err(e) = gateway.connect_all().await {
@@ -431,9 +438,12 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
 
     // 执行 Agent
     // - Team 模式 (Implement 任务 + feature-team 配置就绪): PM→Developer→Tester 协作流程
-    // - 单 Agent 模式 (Fix/Review/其他): 主 Agent 直接执行
+    // - 单 Agent 模式 (Fix/Review/其他): 主 Agent 直接执行 (带记忆注入)
     let use_team_mode = team_available
         && matches!(task_spec.kind, devnpc::trigger::parser::TaskKind::Implement);
+
+    // Team 协作步骤 (仅在 Team 模式下填充,用于报告可视化)
+    let mut team_steps_for_report: Vec<devnpc::report::collector::TeamStepSummary> = Vec::new();
 
     let final_text = if use_team_mode {
         let team = npc_config
@@ -444,14 +454,26 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         let team_result = orchestrator
             .run_team(team, &task_spec.description)
             .await?;
+        // 收集 Team 步骤供报告渲染
+        team_steps_for_report = team_result
+            .steps
+            .iter()
+            .map(|s| devnpc::report::collector::TeamStepSummary {
+                role: s.role.clone(),
+                instruction: s.instruction.clone(),
+                output: s.output.clone(),
+                signals: s.signals.clone(),
+            })
+            .collect();
         if team_result.summary.is_empty() {
             task_spec.description.clone()
         } else {
             team_result.summary
         }
     } else {
+        // 使用 run_with_memory 自动检索相关历史记忆并注入到 Agent 上下文
         orchestrator
-            .run(&task_spec.description, session_service, &session_id, initial_state)
+            .run_with_memory(&task_spec.description, session_service, &session_id, initial_state)
             .await?
     };
 
@@ -477,6 +499,53 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     )
     .await?;
 
+    // 7.5 持久化任务记录到长期记忆 (失败不阻断主流程)
+    if let Some(ref store) = orchestrator.memory_store {
+        let usage_stats = orchestrator.take_usage_stats();
+        let duration_secs = (end_time - start_time).num_seconds().max(0) as u64;
+        let success = matches!(ci_outcome, CiOutcome::Passed { .. });
+        let record = devnpc::adapter::memory::TaskRecord {
+            task_description: task_spec.description.clone(),
+            result_summary: summary.clone(),
+            modified_files: ci_outcome_modified_files(&ci_outcome),
+            duration_secs,
+            token_consumption: usage_stats.total_tokens().max(0) as u64,
+            success,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = store.save_task_record(record) {
+            tracing::warn!(error = %e, "任务记录持久化失败 (不阻断主流程)");
+        } else {
+            tracing::info!("任务记录已持久化到长期记忆");
+        }
+
+        // CI 失败经验持久化 (Failed/Timeout 时记录,便于后续同类问题检索)
+        let (should_save_exp, failure_type, error_msg) = match &ci_outcome {
+            CiOutcome::Failed { last_error, .. } => {
+                (true, "CI失败".to_string(), last_error.clone())
+            }
+            CiOutcome::Timeout { stage, .. } => {
+                (true, "CI超时".to_string(), format!("阶段: {stage}"))
+            }
+            CiOutcome::Passed { .. } => (false, String::new(), String::new()),
+        };
+        if should_save_exp {
+            let exp = devnpc::adapter::memory::FixExperience {
+                failure_type,
+                error_message: error_msg,
+                root_cause: task_spec.description.clone(),
+                fix_method: summary.clone(),
+                success,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = store.save_fix_experience(exp) {
+                tracing::warn!(error = %e, "修复经验持久化失败 (不阻断主流程)");
+            } else {
+                tracing::info!("修复经验已持久化到长期记忆");
+            }
+        }
+    }
+
     // 8. 生成报告并发布
     let trajectory = Trajectory::new();
     // 取出 Orchestrator 累积的真实 token 使用统计
@@ -489,6 +558,7 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         start_time,
         end_time,
         &usage_stats,
+        &team_steps_for_report,
     );
     let html = devnpc::report::html::generate_html(&report_data);
     let report_url = publisher::publish(&html, &config.report.target).await?;
@@ -639,7 +709,24 @@ async fn run_ci_controller(
     }
 }
 
+/// 从 CI 结果中提取修改的文件列表
+///
+/// 当前实现基于 CI 状态推断:
+/// - Passed: 推断 Agent 修改了代码 (分支已推送),无法精确获取文件列表 (需调用 GitLab API)
+/// - Failed/Timeout: 无修改
+///
+/// TODO: 后续可通过 GitLab API 获取 MR diff 精确文件列表
+fn ci_outcome_modified_files(ci_outcome: &CiOutcome) -> Vec<String> {
+    match ci_outcome {
+        CiOutcome::Passed { mr_iid, .. } if *mr_iid > 0 => {
+            vec![format!("MR !{}", mr_iid)]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// 构建报告数据
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     trajectory: &Trajectory,
     summary: &str,
@@ -648,6 +735,7 @@ fn build_report(
     start_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
     usage_stats: &devnpc::adapter::orchestrator::UsageStats,
+    team_steps: &[devnpc::report::collector::TeamStepSummary],
 ) -> ReportData {
     let llm_calls = trajectory
         .events
@@ -744,6 +832,7 @@ fn build_report(
         pipeline_id,
         started_at: start_time.to_rfc3339(),
         finished_at: end_time.to_rfc3339(),
+        team_steps: team_steps.to_vec(),
     }
 }
 

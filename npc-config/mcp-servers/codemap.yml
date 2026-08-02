@@ -1,0 +1,25 @@
+# MCP 服务器配置
+# devnpc 启动时自动加载 npc-config/mcp-servers/*.yml 并注册到 McpGateway
+#
+# 传输方式:
+#   - stdio: 通过子进程启动 (如 codemap)
+#   - http:  通过 streamable HTTP 连接远程服务器 (MCP 2025-06-18 spec)
+#
+# 认证 (仅 http 传输):
+#   bearer_token: Bearer token (Authorization: Bearer <token>)
+#   api_key: 自定义 header (header_name + key)
+#
+# 示例:
+
+# 本地 codemap 服务器 (stdio)
+- name: codemap
+  transport: stdio
+  command: codemap
+  args: ["serve", "--data-dir", ".codemap"]
+
+# 远程 MCP 服务器 (http)
+# - name: remote-tools
+#   transport: http
+#   url: https://mcp.example.com/sse
+#   bearer_token: ${MCP_REMOTE_TOKEN}  # 支持环境变量展开
+#   timeout_secs: 30

@@ -613,7 +613,7 @@ fn parse_trigger_signal(trigger: &str) -> Option<String> {
 ///
 /// - 若 rule.trigger 不含信号约束 (无双引号) → 直接触发 (返回 true)
 /// - 若 rule.trigger 含信号约束 → 检查 signals 中是否包含该信号
-fn handoff_triggered(rule: &HandoffRule, signals: &[String]) -> bool {
+pub fn handoff_triggered(rule: &HandoffRule, signals: &[String]) -> bool {
     let Some(expected) = parse_trigger_signal(&rule.trigger) else {
         return true; // 无信号约束
     };
@@ -627,7 +627,7 @@ fn handoff_triggered(rule: &HandoffRule, signals: &[String]) -> bool {
 /// - `## 信号: decomposed` (中文友好格式)
 ///
 /// 建议在 Role system_prompt 中要求 Agent 完成阶段任务后输出对应信号标记。
-fn parse_signals(output: &str) -> Vec<String> {
+pub fn parse_signals(output: &str) -> Vec<String> {
     let mut signals = Vec::new();
     for line in output.lines() {
         let trimmed = line.trim();
