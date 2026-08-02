@@ -200,6 +200,19 @@ fn load_internal(
         summary,
         context,
         ci,
+        mcp: crate::config::McpConfig {
+            enabled: env::get_optional("DEVNPC_MCP_ENABLED")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            codemap_path: env::get_or_default("DEVNPC_CODEMAP_PATH", "codemap"),
+            codemap_data_dir: env::get_or_default("DEVNPC_CODEMAP_DATA_DIR", ".codemap"),
+        },
+        memory: crate::config::MemoryConfig {
+            enabled: env::get_optional("DEVNPC_MEMORY_ENABLED")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            db_path: env::get_or_default("DEVNPC_MEMORY_DB_PATH", ".devnpc-memory.db"),
+        },
     })
 }
 

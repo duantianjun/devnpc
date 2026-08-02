@@ -171,6 +171,10 @@ pub struct Config {
     pub context: ContextConfig,
     /// CI 闭环配置 (controller.rs)
     pub ci: CiConfig,
+    /// MCP 服务器配置
+    pub mcp: McpConfig,
+    /// 长期记忆配置
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -257,6 +261,26 @@ pub struct ModelRoutingConfig {
     pub simple_model: String,
     /// 复杂任务使用的模型 (Implement, Refactor)
     pub complex_model: String,
+}
+
+/// MCP 服务器配置
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpConfig {
+    /// 是否启用 MCP Gateway
+    pub enabled: bool,
+    /// codemap 二进制路径 (默认 "codemap")
+    pub codemap_path: String,
+    /// codemap 数据目录 (默认 ".codemap")
+    pub codemap_data_dir: String,
+}
+
+/// 长期记忆配置
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MemoryConfig {
+    /// 是否启用长期记忆
+    pub enabled: bool,
+    /// SQLite 存储路径 (默认 ".devnpc-memory.db")
+    pub db_path: String,
 }
 
 impl Config {
