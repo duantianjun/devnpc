@@ -63,6 +63,107 @@ devnpc 监听 GitLab Issue/MR 中的 `@devnpc` 提及,在 CI 内自主完成"读
 | [src/trigger/](src/trigger/) | `@devnpc` 提及解析 |
 | [src/report/](src/report/) | 轨迹采集 + HTML 报告 + 发布 |
 
+## GitLab 集成
+
+### 1. 部署
+
+构建 Docker 镜像并推送到 GitLab Registry:
+
+```bash
+docker build -t registry.example.com/devnpc:latest .
+docker push registry.example.com/devnpc:latest
+```
+
+### 2. GitLab CI 配置
+
+复制 [.gitlab-ci.yml.example](.gitlab-ci.yml.example) 到项目根目录的 `.gitlab-ci.yml`:
+
+```yaml
+stages:
+  - test
+  - npc
+
+test:
+  stage: test
+  script:
+    - cargo test
+
+devnpc:
+  stage: npc
+  image: registry.example.com/devnpc:latest
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: on_stop
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+  variables:
+    DEVNPC_BASE_URL: "https://api.deepseek.com/v1"
+    DEVNPC_MODEL: "deepseek-chat"
+  script:
+    - devnpc run
+  artifacts:
+    paths:
+      - .devnpc-report/
+```
+
+### 3. CI 变量配置
+
+在 GitLab 项目 **Settings → CI/CD → Variables** 中添加:
+
+| 变量 | 说明 | 必填 |
+|------|------|------|
+| `DEVNPC_API_KEY` | LLM API Key | 是 |
+| `DEVNPC_GITLAB_TOKEN` | GitLab Personal Access Token (需 `api` 权限) | 是 |
+
+### 4. 触发方式
+
+#### 方式 A: 在 MR 评论中 @devnpc (推荐)
+
+在 MR 评论中写 `@devnpc` 后跟任务描述:
+
+```
+@devnpc 修复用户登录模块的 token 刷新 bug
+```
+
+devnpc 自动检测 `CI_MERGE_REQUEST_IID` 环境变量,解析最新评论中的提及。
+
+#### 方式 B: 在 Issue 评论中 @devnpc
+
+在 Issue 评论中写 `@devnpc` 后跟任务描述。需要确保 CI 环境变量 `CI_ISSUE_IID` 已设置。
+
+#### 方式 C: 手动触发 (调试)
+
+在 GitLab CI 中手动运行 pipeline,或本地命令行:
+
+```bash
+devnpc run --task "添加用户登录接口的单元测试"
+```
+
+### 5. 执行流程
+
+```
+@devnpc 提及
+    ↓
+trigger 解析 → 读取 MR/Issue 上下文
+    ↓
+Context 构建 → Git 仓库树 + 关键文件摘要 + CI 历史
+    ↓
+LlmAgent 执行 → 读上下文 → 改代码 → 验证编译
+    ↓
+Git 提交 → 创建 Draft MR
+    ↓
+CI 控制器 → 轮询 pipeline → 日志解析 → 修复失败 → 重试
+    ↓
+报告生成 → 发布 HTML 报告 → 评论 MR
+```
+
+1. devnpc 读取 MR/Issue 的评论,解析任务描述
+2. 构建研发记忆(仓库树结构、关键文件摘要、CI 失败历史)
+3. LlmAgent 开始执行: 读取上下文 → 修改代码 → 编译验证
+4. 修改完成后 `git commit` + 创建 Draft MR
+5. CI 控制器轮询 pipeline 状态,失败时自动解析日志、修复、重试
+6. 生成 HTML 执行报告,发布到 Pages 或 artifact,并在 MR 中评论结果
+
 ## 环境变量
 
 ```bash
@@ -89,7 +190,7 @@ cargo build --release
 # 查看当前配置(脱敏)
 ./target/release/devnpc config
 
-# 运行 NPC 任务(CI 内调用)
+# 本地执行任务
 ./target/release/devnpc run --task "修复登录 bug"
 
 # 干跑模式(不真正改码,冒烟测试用)
