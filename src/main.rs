@@ -892,7 +892,10 @@ fn build_report(
             tracing::warn!("Orchestrator 未累积到 usage_metadata, 回退到固定估算");
             let in_tok = llm_calls as u64 * 500;
             let out_tok = llm_calls as u64 * 200;
-            let cost = (in_tok as f64 * 0.000_001_5) + (out_tok as f64 * 0.000_002_0);
+            let cost = devnpc::adapter::orchestrator::UsageStats::estimate_cost(
+                in_tok as i64,
+                out_tok as i64,
+            );
             (in_tok, out_tok, cost, llm_calls as u64)
         };
 

@@ -229,7 +229,11 @@ impl TrajectoryCollector {
         // 估算 token (粗略: 假设每次 LLM call ~500 input + ~200 output)
         let input_tokens = llm_calls as u64 * 500;
         let output_tokens = llm_calls as u64 * 200;
-        let estimated_cost_usd = (input_tokens as f64 * 0.000_001_5) + (output_tokens as f64 * 0.000_002_0);
+        let estimated_cost_usd =
+            crate::adapter::orchestrator::UsageStats::estimate_cost(
+                input_tokens as i64,
+                output_tokens as i64,
+            );
 
         let duration_secs = (end_time - start_time).num_seconds().max(0) as u64;
 

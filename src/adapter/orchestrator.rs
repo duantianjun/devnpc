@@ -93,6 +93,13 @@ pub struct UsageStats {
 }
 
 impl UsageStats {
+    /// 默认 input token 费率 (USD/token)
+    /// $1.5/M tokens (DeepSeek/OpenAI 入门级)
+    pub const DEFAULT_INPUT_RATE: f64 = 0.000_001_5;
+    /// 默认 output token 费率 (USD/token)
+    /// $2.0/M tokens
+    pub const DEFAULT_OUTPUT_RATE: f64 = 0.000_002_0;
+
     /// 总 token 数
     pub fn total_tokens(&self) -> i64 {
         self.input_tokens + self.output_tokens
@@ -105,8 +112,15 @@ impl UsageStats {
         if self.estimated_cost_usd > 0.0 {
             self.estimated_cost_usd
         } else {
-            (self.input_tokens as f64 * 0.000_001_5) + (self.output_tokens as f64 * 0.000_002_0)
+            Self::estimate_cost(self.input_tokens, self.output_tokens)
         }
+    }
+
+    /// 按默认费率估算成本 (USD)
+    /// 用于回退场景: provider 未返回 usage_metadata,仅有 token 数估算
+    pub fn estimate_cost(input_tokens: i64, output_tokens: i64) -> f64 {
+        (input_tokens as f64 * Self::DEFAULT_INPUT_RATE)
+            + (output_tokens as f64 * Self::DEFAULT_OUTPUT_RATE)
     }
 }
 
