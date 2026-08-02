@@ -99,6 +99,33 @@ fn create_anthropic(_config: &LlmConfig) -> Result<Arc<dyn Llm>, DevnpcError> {
     ))
 }
 
+/// 创建简单任务模型 (小模型，用于阅读/搜索)
+pub fn create_simple_model(config: &crate::config::Config) -> Result<Arc<dyn adk_rust::Llm>, crate::error::DevnpcError> {
+    if config.model_routing.simple_model.is_empty() {
+        // 回退到主模型
+        return create_model(&config.llm);
+    }
+    // 使用简单模型配置
+    let simple_config = crate::config::LlmConfig {
+        model: config.model_routing.simple_model.clone(),
+        ..config.llm.clone()
+    };
+    create_model(&simple_config)
+}
+
+/// 创建复杂任务模型 (大模型，用于改码/修复/推理)
+pub fn create_complex_model(config: &crate::config::Config) -> Result<Arc<dyn adk_rust::Llm>, crate::error::DevnpcError> {
+    if config.model_routing.complex_model.is_empty() {
+        // 回退到主模型
+        return create_model(&config.llm);
+    }
+    let complex_config = crate::config::LlmConfig {
+        model: config.model_routing.complex_model.clone(),
+        ..config.llm.clone()
+    };
+    create_model(&complex_config)
+}
+
 /// 创建 Gemini 模型客户端
 #[cfg(feature = "gemini")]
 fn create_gemini(config: &LlmConfig) -> Result<Arc<dyn Llm>, DevnpcError> {

@@ -16,19 +16,19 @@ use crate::error::Result;
 /// Orchestrator: 负责任务编排
 pub struct Orchestrator {
     /// 主 Agent (Orchestrator 自身)
-    pub agent: LlmAgent,
+    pub agent: Arc<LlmAgent>,
     /// 子 Agent
-    pub code_agent: Option<LlmAgent>,
-    pub fix_agent: Option<LlmAgent>,
-    pub review_agent: Option<LlmAgent>,
+    pub code_agent: Option<Arc<LlmAgent>>,
+    pub fix_agent: Option<Arc<LlmAgent>>,
+    pub review_agent: Option<Arc<LlmAgent>>,
 }
 
 impl Orchestrator {
     pub fn new(
-        agent: LlmAgent,
-        code_agent: Option<LlmAgent>,
-        fix_agent: Option<LlmAgent>,
-        review_agent: Option<LlmAgent>,
+        agent: Arc<LlmAgent>,
+        code_agent: Option<Arc<LlmAgent>>,
+        fix_agent: Option<Arc<LlmAgent>>,
+        review_agent: Option<Arc<LlmAgent>>,
     ) -> Self {
         Self {
             agent,
@@ -54,7 +54,7 @@ impl Orchestrator {
             .create(CreateRequest {
                 app_name: "devnpc".to_string(),
                 user_id: "devnpc".to_string(),
-                session_id: Some(session_id_typed.clone()),
+                session_id: Some(session_id_typed.to_string()),
                 state: initial_state,
             })
             .await
@@ -62,7 +62,7 @@ impl Orchestrator {
 
         let runner = Runner::builder()
             .app_name("devnpc")
-            .agent(Arc::new(self.agent.clone()))
+            .agent(self.agent.clone())
             .session_service(session_service)
             .build()
             .map_err(|e| crate::error::DevnpcError::Config(format!("Runner 构建失败: {e}")))?;
@@ -114,7 +114,7 @@ impl Orchestrator {
             .create(CreateRequest {
                 app_name: "devnpc-fix".to_string(),
                 user_id: "devnpc".to_string(),
-                session_id: Some(session_id_typed.clone()),
+                session_id: Some(session_id_typed.to_string()),
                 state: std::collections::HashMap::new(),
             })
             .await
@@ -122,7 +122,7 @@ impl Orchestrator {
 
         let runner = Runner::builder()
             .app_name("devnpc-fix")
-            .agent(Arc::new(fix_agent.clone()))
+            .agent(fix_agent.clone())
             .session_service(session_service)
             .build()
             .map_err(|e| crate::error::DevnpcError::Config(format!("Fix Runner 构建失败: {e}")))?;
