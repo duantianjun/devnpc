@@ -2,7 +2,7 @@
 //!
 //! 并行获取仓库结构、Issue、PR、CI 历史,聚合为 Context。
 
-use crate::config::ProjectConfig;
+use crate::config::{ContextConfig, ProjectConfig};
 use crate::error::Result;
 use crate::git::ops::GitOps;
 use crate::gitlab_api::{Issue, MergeRequest, Note, Pipeline};
@@ -66,11 +66,11 @@ pub enum FailureType {
 /// 从 pipelines 提取失败记录 (P2 简化版: 仅按 status,无日志解析)
 ///
 /// 详细 job 日志解析留 P4 (ci/log_parser)。
-pub fn extract_failures(pipelines: &[Pipeline]) -> Vec<CiFailure> {
+pub fn extract_failures(pipelines: &[Pipeline], config: &ContextConfig) -> Vec<CiFailure> {
     pipelines
         .iter()
         .filter(|p| p.status == "failed")
-        .take(5)
+        .take(config.max_ci_history_failures)
         .map(|p| CiFailure {
             pipeline_id: p.id,
             job_name: "unknown".to_string(),
@@ -89,6 +89,8 @@ impl Context {
         git: &GitOps,
         project_id: u64,
         issue_iid: u64,
+        summary_config: &crate::config::SummaryConfig,
+        context_config: &ContextConfig,
     ) -> Result<Self> {
         // 并行: Git 侧 (repo_tree) + GitLab 侧 (issue/related_mrs/notes/pipelines)
         // Git 侧是同步 I/O,用 spawn_blocking 避免阻塞异步运行时
@@ -107,12 +109,12 @@ impl Context {
                 gitlab.get_issue(project_id, issue_iid),
                 gitlab.get_related_mrs(project_id, issue_iid),
                 gitlab.get_issue_notes(project_id, issue_iid),
-                git.recent_commits(20),
-                gitlab.get_recent_pipelines(project_id, 5),
+                git.recent_commits(context_config.max_recent_commits),
+                gitlab.get_recent_pipelines(project_id, context_config.max_recent_pipelines),
             )?;
 
-        let key_files = crate::memory::repo_index::select_key_files(&repo_tree, &git.workspace);
-        let ci_failures = extract_failures(&pipelines);
+        let key_files = crate::memory::repo_index::select_key_files(&repo_tree, &git.workspace, summary_config);
+        let ci_failures = extract_failures(&pipelines, context_config);
 
         // project_config: P2 阶段用默认;完整集成(读 .devnpc.md)留 P3 npc runner
         let project_config = ProjectConfig::default();
@@ -150,6 +152,10 @@ mod tests {
         }
     }
 
+    fn default_context_config() -> ContextConfig {
+        ContextConfig::default()
+    }
+
     #[test]
     fn extract_failures_filters_failed_pipelines() {
         let pipelines = vec![
@@ -158,7 +164,7 @@ mod tests {
             make_pipeline(3, "running"),
             make_pipeline(4, "failed"),
         ];
-        let failures = extract_failures(&pipelines);
+        let failures = extract_failures(&pipelines, &default_context_config());
         assert_eq!(failures.len(), 2);
         assert_eq!(failures[0].pipeline_id, 2);
         assert_eq!(failures[1].pipeline_id, 4);
@@ -167,14 +173,14 @@ mod tests {
     #[test]
     fn extract_failures_caps_at_5() {
         let pipelines: Vec<Pipeline> = (1..=10).map(|i| make_pipeline(i, "failed")).collect();
-        let failures = extract_failures(&pipelines);
+        let failures = extract_failures(&pipelines, &default_context_config());
         assert_eq!(failures.len(), 5);
     }
 
     #[test]
     fn extract_failures_sets_other_type_and_default_cause() {
         let pipelines = vec![make_pipeline(1, "failed")];
-        let failures = extract_failures(&pipelines);
+        let failures = extract_failures(&pipelines, &default_context_config());
         assert_eq!(failures[0].failure_type, FailureType::Other);
         assert_eq!(failures[0].root_cause, "pipeline failed");
         assert_eq!(failures[0].job_name, "unknown");
@@ -183,7 +189,7 @@ mod tests {
     #[test]
     fn extract_failures_empty_when_no_failures() {
         let pipelines = vec![make_pipeline(1, "success")];
-        let failures = extract_failures(&pipelines);
+        let failures = extract_failures(&pipelines, &default_context_config());
         assert!(failures.is_empty());
     }
 
@@ -225,6 +231,14 @@ mod tests {
         ) -> Result<Note> {
             unimplemented!("mock")
         }
+        async fn create_issue_note(
+            &self,
+            _project_id: u64,
+            _issue_iid: u64,
+            _body: &str,
+        ) -> Result<Note> {
+            unimplemented!("mock")
+        }
         async fn get_related_mrs(
             &self,
             _project_id: u64,
@@ -238,6 +252,15 @@ mod tests {
             _count: usize,
         ) -> Result<Vec<Pipeline>> {
             Ok(self.pipelines.clone())
+        }
+        async fn update_mr(&self, _project_id: u64, _mr_iid: u64, _title: &str, _draft: bool) -> Result<MergeRequest> {
+            unimplemented!("mock")
+        }
+        async fn get_pipeline_jobs(&self, _project_id: u64, _pipeline_id: u64) -> Result<Vec<crate::gitlab_api::Job>> {
+            unimplemented!("mock")
+        }
+        async fn get_job_log(&self, _project_id: u64, _job_id: u64) -> Result<String> {
+            unimplemented!("mock")
         }
     }
 
@@ -320,7 +343,7 @@ mod tests {
             ],
         };
 
-        let ctx = Context::build(&mock_gitlab, &ops, 1, 42).await.unwrap();
+        let ctx = Context::build(&mock_gitlab, &ops, 1, 42, &crate::config::SummaryConfig::default(), &default_context_config()).await.unwrap();
 
         // Issue
         assert_eq!(ctx.issue.iid, 42);

@@ -1,0 +1,15 @@
+name: test-gen
+description: 测试用例生成流程
+steps:
+  - name: 需求分析
+    expected_tools: [read_file, view_symbol]
+    hint: "理解被测试功能的输入输出和边界条件"
+  - name: 用例设计
+    expected_tools: [write_file]
+    hint: "编写单元测试和集成测试,覆盖正常/异常路径"
+  - name: 测试执行
+    expected_tools: [run_command, git_diff]
+    hint: "运行测试确保通过,提交测试代码"
+  - name: 报告
+    expected_tools: [finish]
+    hint: "总结测试覆盖率和发现的问题"

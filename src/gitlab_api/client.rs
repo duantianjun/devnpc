@@ -7,7 +7,7 @@ use reqwest::StatusCode;
 
 use crate::error::{DevnpcError, Result};
 
-use super::{CreateMrReq, GitlabApi, Issue, MergeRequest, Note, Pipeline};
+use super::{CreateMrReq, GitlabApi, Issue, Job, MergeRequest, Note, Pipeline};
 
 /// reqwest 实现
 pub struct GitlabClient {
@@ -47,6 +47,57 @@ impl GitlabClient {
             });
         }
         Ok(resp.json::<T>().await?)
+    }
+
+    /// 发 PUT 请求,返回反序列化的 JSON。
+    async fn put<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        form: &[(&str, &str)],
+    ) -> Result<T> {
+        let resp = self
+            .http
+            .put(url)
+            .header("PRIVATE-TOKEN", &self.token)
+            .form(form)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DevnpcError::GitlabNotFound { resource: body });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DevnpcError::GitlabApi {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(resp.json::<T>().await?)
+    }
+
+    /// 发 GET 请求,返回原始文本 (用于 job 日志)
+    async fn get_raw(&self, url: &str) -> Result<String> {
+        let resp = self
+            .http
+            .get(url)
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DevnpcError::GitlabNotFound { resource: body });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DevnpcError::GitlabApi {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(resp.text().await?)
     }
 
     /// 发 POST 请求,返回反序列化的 JSON。
@@ -125,6 +176,20 @@ impl GitlabClient {
             self.base_url, project_id, count
         )
     }
+
+    fn pipeline_jobs_url(&self, project_id: u64, pipeline_id: u64) -> String {
+        format!(
+            "{}/api/v4/projects/{}/pipelines/{}/jobs",
+            self.base_url, project_id, pipeline_id
+        )
+    }
+
+    fn job_log_url(&self, project_id: u64, job_id: u64) -> String {
+        format!(
+            "{}/api/v4/projects/{}/jobs/{}/trace",
+            self.base_url, project_id, job_id
+        )
+    }
 }
 
 #[async_trait]
@@ -182,6 +247,11 @@ impl GitlabApi for GitlabClient {
         self.post(&url, &[("body", body)]).await
     }
 
+    async fn create_issue_note(&self, project_id: u64, issue_iid: u64, body: &str) -> Result<Note> {
+        let url = self.issue_notes_url(project_id, issue_iid);
+        self.post(&url, &[("body", body)]).await
+    }
+
     async fn get_related_mrs(&self, project_id: u64, issue_iid: u64) -> Result<Vec<MergeRequest>> {
         let url = self.related_mrs_url(project_id, issue_iid);
         self.get(&url).await
@@ -190,6 +260,31 @@ impl GitlabApi for GitlabClient {
     async fn get_recent_pipelines(&self, project_id: u64, count: usize) -> Result<Vec<Pipeline>> {
         let url = self.pipelines_url_with_limit(project_id, count);
         self.get(&url).await
+    }
+
+    async fn update_mr(&self, project_id: u64, mr_iid: u64, title: &str, draft: bool) -> Result<MergeRequest> {
+        let url = self.mr_url(project_id, mr_iid);
+        let title_val = if draft {
+            format!("Draft: {}", title)
+        } else {
+            // 移除 "Draft: " 前缀
+            title.trim_start_matches("Draft: ").to_string()
+        };
+        self.put(
+            &url,
+            &[("title", &title_val)],
+        )
+        .await
+    }
+
+    async fn get_pipeline_jobs(&self, project_id: u64, pipeline_id: u64) -> Result<Vec<Job>> {
+        let url = self.pipeline_jobs_url(project_id, pipeline_id);
+        self.get(&url).await
+    }
+
+    async fn get_job_log(&self, project_id: u64, job_id: u64) -> Result<String> {
+        let url = self.job_log_url(project_id, job_id);
+        self.get_raw(&url).await
     }
 }
 

@@ -1,0 +1,17 @@
+name: bugfix
+description: Bug 修复流程
+steps:
+  - name: 复现
+    expected_tools: [run_command, read_file, view_symbol]
+    hint: "先尝试复现 bug,理解错误信息"
+  - name: 定位
+    expected_tools: [search_symbols, view_symbol, outline]
+    hint: "找到问题代码位置"
+  - name: 修复
+    expected_tools: [edit_symbol, ast_replace, write_file]
+    hint: "最小改动原则"
+  - name: 验证
+    expected_tools: [run_command, git_commit, git_diff]
+    hint: "跑 required_checks"
+  - name: 完成
+    expected_tools: [finish]

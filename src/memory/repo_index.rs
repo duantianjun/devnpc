@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::config::SummaryConfig;
 use crate::error::Result;
 use crate::git::ops::GitOps;
 use crate::memory::context::{KeyFile, RepoTree, TreeEntry, TreeKind};
@@ -60,47 +61,27 @@ fn parse_ls_tree(output: &str) -> Vec<TreeEntry> {
         .collect()
 }
 
-/// 关键文件路径匹配规则 (6 类)
-const KEY_FILE_PATTERNS: &[&str] = &[
-    // 包管理
-    "Cargo.toml",
-    "package.json",
-    "go.mod",
-    "pyproject.toml",
-    // 文档
-    "README.md",
-    ".devnpc.md",
-    // CI 配置
-    ".gitlab-ci.yml",
-    // 入口文件
-    "src/main.rs",
-    "src/lib.rs",
-    // 构建脚本
-    "Makefile",
-    "justfile",
-];
-
-/// 选择关键文件 (6 类) 并生成摘要
+/// 选择关键文件并生成摘要
 ///
 /// 摘要规则 (降 token):
-/// - Cargo.toml → 保留 [dependencies] 段 (若存在),否则前 30 行
-/// - README.md / .devnpc.md → 前 30 行
-/// - src/main.rs / src/lib.rs → 前 50 行
-/// - 其他 → 前 20 行
-pub fn select_key_files(tree: &RepoTree, workspace: &Path) -> Vec<KeyFile> {
+/// - Cargo.toml → 保留 [dependencies] 段 (若存在),否则前 readme_lines 行
+/// - README.md / .devnpc.md → 前 readme_lines 行
+/// - src/main.rs / src/lib.rs → 前 main_rs_lines 行
+/// - 其他 → 前 other_lines 行
+pub fn select_key_files(tree: &RepoTree, workspace: &Path, config: &SummaryConfig) -> Vec<KeyFile> {
     let mut key_files = Vec::new();
     for entry in &tree.entries {
         if entry.kind != TreeKind::File {
             continue;
         }
-        if !KEY_FILE_PATTERNS.contains(&entry.path.as_str()) {
+        if !config.key_file_patterns.contains(&entry.path) {
             continue;
         }
         let full_path = workspace.join(&entry.path);
         let Ok(content) = std::fs::read_to_string(&full_path) else {
             continue;
         };
-        let summary = summarize(&entry.path, &content);
+        let summary = summarize(&entry.path, &content, config);
         key_files.push(KeyFile {
             path: entry.path.clone(),
             summary,
@@ -110,17 +91,17 @@ pub fn select_key_files(tree: &RepoTree, workspace: &Path) -> Vec<KeyFile> {
 }
 
 /// 按文件类型生成摘要
-fn summarize(path: &str, content: &str) -> String {
+fn summarize(path: &str, content: &str, config: &SummaryConfig) -> String {
     match path {
-        "Cargo.toml" => summarize_cargo_toml(content),
-        "README.md" | ".devnpc.md" => take_first_n_lines(content, 30),
-        "src/main.rs" | "src/lib.rs" => take_first_n_lines(content, 50),
-        _ => take_first_n_lines(content, 20),
+        "Cargo.toml" => summarize_cargo_toml(content, config),
+        "README.md" | ".devnpc.md" => take_first_n_lines(content, config.readme_lines),
+        "src/main.rs" | "src/lib.rs" => take_first_n_lines(content, config.main_rs_lines),
+        _ => take_first_n_lines(content, config.other_lines),
     }
 }
 
-/// Cargo.toml 摘要: 保留 [dependencies] 段;若无则返回前 30 行
-fn summarize_cargo_toml(content: &str) -> String {
+/// Cargo.toml 摘要: 保留 [dependencies] 段;若无则返回前 readme_lines 行
+fn summarize_cargo_toml(content: &str, config: &SummaryConfig) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let mut result = Vec::new();
     let mut in_deps = false;
@@ -133,8 +114,8 @@ fn summarize_cargo_toml(content: &str) -> String {
         }
     }
     if result.is_empty() {
-        // 无 [dependencies] 段,返回前 30 行
-        take_first_n_lines(content, 30)
+        // 无 [dependencies] 段,返回前 readme_lines 行
+        take_first_n_lines(content, config.readme_lines)
     } else {
         result.join("\n")
     }
@@ -148,10 +129,15 @@ fn take_first_n_lines(content: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SummaryConfig;
     use crate::git::ops::GitOps;
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
+
+    fn default_summary_config() -> SummaryConfig {
+        SummaryConfig::default()
+    }
 
     fn setup_temp_repo() -> (TempDir, GitOps) {
         let dir = tempfile::tempdir().unwrap();
@@ -231,7 +217,7 @@ mod tests {
     fn select_key_files_picks_cargo_toml_and_readme() {
         let (_dir, ops) = setup_temp_repo();
         let tree = build_repo_tree(&ops.workspace).unwrap();
-        let key_files = select_key_files(&tree, &ops.workspace);
+        let key_files = select_key_files(&tree, &ops.workspace, &default_summary_config());
         let paths: Vec<&str> = key_files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"Cargo.toml"));
         assert!(paths.contains(&"README.md"));
@@ -241,7 +227,7 @@ mod tests {
     fn select_key_files_cargo_toml_summary_includes_package_name() {
         let (_dir, ops) = setup_temp_repo();
         let tree = build_repo_tree(&ops.workspace).unwrap();
-        let key_files = select_key_files(&tree, &ops.workspace);
+        let key_files = select_key_files(&tree, &ops.workspace, &default_summary_config());
         let cargo = key_files
             .iter()
             .find(|f| f.path == "Cargo.toml")
@@ -261,7 +247,7 @@ mod tests {
         std::fs::write(ops.workspace.join("README.md"), long_readme).unwrap();
         // select_key_files 读工作区文件,不需重新 commit
         let tree = build_repo_tree(&ops.workspace).unwrap();
-        let key_files = select_key_files(&tree, &ops.workspace);
+        let key_files = select_key_files(&tree, &ops.workspace, &default_summary_config());
         let readme = key_files
             .iter()
             .find(|f| f.path == "README.md")
@@ -274,7 +260,7 @@ mod tests {
     fn select_key_files_picks_src_main_rs() {
         let (_dir, ops) = setup_temp_repo();
         let tree = build_repo_tree(&ops.workspace).unwrap();
-        let key_files = select_key_files(&tree, &ops.workspace);
+        let key_files = select_key_files(&tree, &ops.workspace, &default_summary_config());
         let paths: Vec<&str> = key_files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"src/main.rs"));
     }
@@ -285,7 +271,7 @@ mod tests {
         // 加一个非关键文件
         std::fs::write(ops.workspace.join("random.txt"), "data").unwrap();
         let tree = build_repo_tree(&ops.workspace).unwrap();
-        let key_files = select_key_files(&tree, &ops.workspace);
+        let key_files = select_key_files(&tree, &ops.workspace, &default_summary_config());
         let paths: Vec<&str> = key_files.iter().map(|f| f.path.as_str()).collect();
         assert!(!paths.contains(&"random.txt"));
     }

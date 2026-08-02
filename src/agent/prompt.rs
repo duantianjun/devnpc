@@ -10,23 +10,29 @@ use crate::memory::context::Context;
 ///
 /// `role_prompt`: 角色 system prompt (来自 Role,P6 引入;P3 由调用方传入)
 /// `task_description`: 任务描述 (来自 trigger 解析)
+/// `workspace`: 工作目录路径
+/// `branch`: 当前 git 分支名
+/// `acceptance_criteria`: 验收标准列表
 pub fn build_initial_messages(
     context: &Context,
     role_prompt: &str,
     task_description: &str,
+    workspace: &str,
+    branch: &str,
+    acceptance_criteria: &[String],
 ) -> Vec<Message> {
-    let system = build_system_prompt(role_prompt, &context.project_config);
-    let user = build_user_prompt(context, task_description);
+    let system = build_system_prompt(role_prompt, &context.project_config, workspace, branch);
+    let user = build_user_prompt(context, task_description, acceptance_criteria);
     vec![Message::system(system), Message::user(user)]
 }
 
-fn build_system_prompt(role_prompt: &str, project: &crate::config::ProjectConfig) -> String {
+fn build_system_prompt(role_prompt: &str, project: &crate::config::ProjectConfig, workspace: &str, branch: &str) -> String {
     let mut parts = Vec::new();
     parts.push(role_prompt.to_string());
-    parts.push(
-        "你是 devnpc,基于 GitLab 的研发流程 AI 智能体。遵循项目规范,优先用最小改动解决问题。"
+    parts.push("你是 devnpc,基于 GitLab 的研发流程 AI 智能体。遵循项目规范,优先用最小改动解决问题。"
             .to_string(),
     );
+    parts.push(format!("\n# 工作环境\n工作目录: {workspace}\n当前分支: {branch}"));
     if !project.guidelines_markdown.is_empty() {
         parts.push(format!("\n# 项目规范\n{}", project.guidelines_markdown));
     }
@@ -49,7 +55,7 @@ fn build_system_prompt(role_prompt: &str, project: &crate::config::ProjectConfig
     parts.join("\n\n")
 }
 
-fn build_user_prompt(context: &Context, task_description: &str) -> String {
+fn build_user_prompt(context: &Context, task_description: &str, acceptance_criteria: &[String]) -> String {
     let mut sections = Vec::new();
 
     // 仓库结构
@@ -124,6 +130,14 @@ fn build_user_prompt(context: &Context, task_description: &str) -> String {
         sections.push(format!("## 已知 CI 失败\n{}", failures.join("\n")));
     }
 
+    // 验收标准
+    if !acceptance_criteria.is_empty() {
+        sections.push(format!(
+            "## 验收标准\n{}",
+            acceptance_criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n")
+        ));
+    }
+
     // 任务
     sections.push(format!("# 任务\n{}", task_description));
 
@@ -184,7 +198,7 @@ mod tests {
     #[test]
     fn build_initial_messages_returns_system_then_user() {
         let ctx = make_context();
-        let msgs = build_initial_messages(&ctx, "你是开发 NPC", "修复登录 bug");
+        let msgs = build_initial_messages(&ctx, "你是开发 NPC", "修复登录 bug", "/workspace", "feat/fix-bug", &[]);
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0], Message::System { .. }));
         assert!(matches!(msgs[1], Message::User { .. }));
@@ -199,7 +213,7 @@ mod tests {
             project_config: project,
             ..ctx
         };
-        let msgs = build_initial_messages(&ctx_with_guidelines, "你是开发 NPC", "任务");
+        let msgs = build_initial_messages(&ctx_with_guidelines, "你是开发 NPC", "任务", "/workspace", "feat/task", &[]);
         if let Message::System { content } = &msgs[0] {
             assert!(content.contains("你是开发 NPC"));
             assert!(content.contains("禁止 unwrap"));
@@ -211,7 +225,7 @@ mod tests {
     #[test]
     fn user_prompt_includes_issue_and_task() {
         let ctx = make_context();
-        let msgs = build_initial_messages(&ctx, "role", "修复登录 bug");
+        let msgs = build_initial_messages(&ctx, "role", "修复登录 bug", "/workspace", "feat/fix-bug", &[]);
         if let Message::User { content } = &msgs[1] {
             assert!(content.contains("登录 bug"));
             assert!(content.contains("无法登录"));
@@ -225,10 +239,36 @@ mod tests {
     #[test]
     fn user_prompt_includes_repo_tree_with_dir_marker() {
         let ctx = make_context();
-        let msgs = build_initial_messages(&ctx, "role", "task");
+        let msgs = build_initial_messages(&ctx, "role", "task", "/workspace", "feat/task", &[]);
         if let Message::User { content } = &msgs[1] {
             // src 是目录,应带 /
             assert!(content.contains("src/"));
+        } else {
+            panic!("expected User message");
+        }
+    }
+
+    #[test]
+    fn system_prompt_includes_workspace_and_branch() {
+        let ctx = make_context();
+        let msgs = build_initial_messages(&ctx, "role", "task", "/my/workspace", "feat/my-branch", &[]);
+        if let Message::System { content } = &msgs[0] {
+            assert!(content.contains("/my/workspace"));
+            assert!(content.contains("feat/my-branch"));
+        } else {
+            panic!("expected System message");
+        }
+    }
+
+    #[test]
+    fn user_prompt_includes_acceptance_criteria() {
+        let ctx = make_context();
+        let criteria = vec!["测试通过".into(), "代码规范".into()];
+        let msgs = build_initial_messages(&ctx, "role", "task", "/workspace", "feat/task", &criteria);
+        if let Message::User { content } = &msgs[1] {
+            assert!(content.contains("验收标准"));
+            assert!(content.contains("测试通过"));
+            assert!(content.contains("代码规范"));
         } else {
             panic!("expected User message");
         }

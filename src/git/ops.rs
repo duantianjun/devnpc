@@ -96,6 +96,12 @@ impl GitOps {
         .map(|_| ())
     }
 
+    /// 合并指定分支到当前分支
+    pub async fn merge_branch(&self, branch: &str) -> Result<()> {
+        self.run_git_cmd(&["merge".into(), branch.into()])
+            .map(|_| ())
+    }
+
     /// 获取最近 N 条提交 (git log --oneline -N)
     pub async fn recent_commits(&self, count: usize) -> Result<Vec<String>> {
         let n = format!("-{count}");

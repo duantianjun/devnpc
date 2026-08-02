@@ -3,8 +3,10 @@
 //! P3 实现 8 个自建工具:
 //! read_file, write_file, list_files, git_diff (自建文件/git),
 //! run_command (shell), git_commit (git), create_mr_note (gitlab), finish。
-//! AFT 5 工具 (view_symbol 等) 留 P3.5。
+//! P3.5 实现 5 个 AFT 工具:
+//! aft_outline, aft_view_symbol, aft_edit_symbol, aft_search_symbols, aft_ast_replace。
 
+pub mod aft;
 pub mod file_io;
 pub mod finish;
 pub mod git_tool;

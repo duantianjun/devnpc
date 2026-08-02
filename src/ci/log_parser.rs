@@ -8,6 +8,8 @@
 
 use serde::Deserialize;
 
+use crate::config::LogParserConfig;
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureType {
@@ -31,6 +33,11 @@ pub struct ParsedFailure {
 
 /// 解析日志 (MVP: Rust)
 pub fn parse_log(job_name: &str, log: &str) -> Vec<ParsedFailure> {
+    parse_log_with_config(job_name, log, &LogParserConfig::default())
+}
+
+/// 解析日志 (可配置)
+pub fn parse_log_with_config(job_name: &str, log: &str, config: &LogParserConfig) -> Vec<ParsedFailure> {
     let mut failures = Vec::new();
 
     for (i, line) in log.lines().enumerate() {
@@ -80,9 +87,9 @@ pub fn parse_log(job_name: &str, log: &str) -> Vec<ParsedFailure> {
         }
     }
 
-    // 去重 + 限 10 条
+    // 去重 + 限 N 条
     failures.dedup_by(|a, b| a.error_message == b.error_message);
-    failures.truncate(10);
+    failures.truncate(config.max_failures);
     failures
 }
 

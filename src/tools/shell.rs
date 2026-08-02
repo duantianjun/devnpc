@@ -9,27 +9,24 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::config::CommandConfig;
 use crate::error::{DevnpcError, Result};
 use crate::tools::{Tool, ToolResult};
-
-/// 允许执行的命令白名单 (安全优先)
-const ALLOWLIST: &[&str] = &["cargo", "rustc", "make", "just", "fmt", "clippy", "echo"];
-
-/// 禁止的命令黑名单 (即使白名单也拦截)
-const DENYLIST: &[&str] = &["rm", "mv", "cp", "curl", "wget", "ssh", "scp"];
-
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 pub struct RunCommandTool {
     workspace: PathBuf,
     timeout: Duration,
+    allowlist: Vec<String>,
+    denylist: Vec<String>,
 }
 
 impl RunCommandTool {
-    pub fn new(workspace: impl Into<PathBuf>) -> Self {
+    pub fn new(workspace: impl Into<PathBuf>, config: CommandConfig) -> Self {
         Self {
             workspace: workspace.into(),
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            timeout: Duration::from_secs(config.default_timeout_secs),
+            allowlist: config.allowlist,
+            denylist: config.denylist,
         }
     }
 
@@ -76,15 +73,15 @@ impl Tool for RunCommandTool {
         })?;
 
         // 黑名单优先
-        if DENYLIST.contains(&parsed.cmd.as_str()) {
+        if self.denylist.contains(&parsed.cmd) {
             return Ok(ToolResult::err(format!("命令 {} 在黑名单中", parsed.cmd)));
         }
         // 白名单检查
-        if !ALLOWLIST.contains(&parsed.cmd.as_str()) {
+        if !self.allowlist.contains(&parsed.cmd) {
             return Ok(ToolResult::err(format!(
                 "命令 {} 不在白名单中 (允许: {})",
                 parsed.cmd,
-                ALLOWLIST.join(", ")
+                self.allowlist.join(", ")
             )));
         }
 
@@ -133,10 +130,14 @@ impl Tool for RunCommandTool {
 mod tests {
     use super::*;
 
+    fn default_command_config() -> CommandConfig {
+        CommandConfig::default()
+    }
+
     #[tokio::test]
     async fn run_command_executes_whitelisted_cargo() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = RunCommandTool::new(dir.path());
+        let tool = RunCommandTool::new(dir.path(), default_command_config());
         // 用 cargo --version (跨平台真实可执行文件,echo 在 Windows 是 CMD 内建)
         let result = tool
             .call(&serde_json::json!({"cmd": "cargo", "args": ["--version"]}))
@@ -149,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejects_non_whitelisted() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = RunCommandTool::new(dir.path());
+        let tool = RunCommandTool::new(dir.path(), default_command_config());
         let result = tool
             .call(&serde_json::json!({"cmd": "ls"}))
             .await
@@ -161,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejects_blacklisted() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = RunCommandTool::new(dir.path());
+        let tool = RunCommandTool::new(dir.path(), default_command_config());
         let result = tool
             .call(&serde_json::json!({"cmd": "rm", "args": ["-rf", "/"]}))
             .await
@@ -173,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_returns_err_on_non_zero_exit() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = RunCommandTool::new(dir.path());
+        let tool = RunCommandTool::new(dir.path(), default_command_config());
         // cargo 一个必然失败的子命令
         let result = tool
             .call(&serde_json::json!({"cmd": "cargo", "args": ["nonexistent-subcommand"]}))
@@ -190,7 +191,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // 用极短超时跑一个立即返回的命令,验证 timeout_secs 参数被接受
         // cargo --version 立即返回,跨平台可执行
-        let tool = RunCommandTool::new(dir.path()).with_timeout(Duration::from_millis(500));
+        let tool = RunCommandTool::new(dir.path(), default_command_config()).with_timeout(Duration::from_millis(500));
         let result = tool
             .call(&serde_json::json!({"cmd": "cargo", "args": ["--version"]}))
             .await

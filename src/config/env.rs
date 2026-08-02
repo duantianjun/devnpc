@@ -1,6 +1,6 @@
 //! 环境变量读取与类型解析
 
-use crate::config::SopMode;
+use crate::config::{ModelRoutingConfig, SopMode};
 use crate::error::{DevnpcError, Result};
 
 /// 从环境变量读取字符串,缺失则返回错误
@@ -16,6 +16,42 @@ pub fn get_or_default(var: &str, default: &str) -> String {
 /// 读取可选字符串环境变量 (缺失返回 None)
 pub fn get_optional(var: &str) -> Option<String> {
     std::env::var(var).ok()
+}
+
+/// 读取并解析为 u64,缺失返回 None,解析失败返回错误
+pub fn get_u64(var: &str) -> Result<Option<u64>> {
+    match std::env::var(var) {
+        Ok(s) => s
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| DevnpcError::Config(format!("环境变量 {var} 不是有效 u64: {s}"))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// 读取并解析为 usize,缺失返回 None,解析失败返回错误
+pub fn get_usize(var: &str) -> Result<Option<usize>> {
+    match std::env::var(var) {
+        Ok(s) => s
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_| DevnpcError::Config(format!("环境变量 {var} 不是有效 usize: {s}"))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// 读取逗号分隔的字符串列表,缺失返回 None
+pub fn get_vec(var: &str) -> Option<Vec<String>> {
+    match std::env::var(var) {
+        Ok(s) => {
+            if s.trim().is_empty() {
+                Some(vec![])
+            } else {
+                Some(s.split(',').map(|s| s.trim().to_string()).collect())
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 /// 读取并解析为 u32,缺失返回 None,解析失败返回错误
@@ -66,6 +102,21 @@ pub fn get_report_target(var: &str) -> Result<Option<crate::config::ReportTarget
                 "环境变量 {var} 必须是 artifact|pages|none,实际: {s}"
             ))),
         },
+        Err(_) => Ok(None),
+    }
+}
+
+/// 读取模型路由配置 (JSON 格式),缺失返回 None
+pub fn get_model_routing(var: &str) -> Result<Option<ModelRoutingConfig>> {
+    match std::env::var(var) {
+        Ok(s) => {
+            if s.trim().is_empty() {
+                return Ok(None);
+            }
+            serde_json::from_str(&s)
+                .map(Some)
+                .map_err(|e| DevnpcError::Config(format!("环境变量 {var} JSON 解析失败: {e}")))
+        }
         Err(_) => Ok(None),
     }
 }

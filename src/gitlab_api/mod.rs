@@ -20,10 +20,22 @@ pub trait GitlabApi: Send + Sync {
     async fn create_mr(&self, project_id: u64, req: CreateMrReq) -> Result<MergeRequest>;
     async fn get_pipelines(&self, project_id: u64) -> Result<Vec<Pipeline>>;
     async fn get_issue_notes(&self, project_id: u64, iid: u64) -> Result<Vec<Note>>;
-    async fn get_mr_notes(&self, project_id: u64, iid: u64) -> Result<Vec<Note>>;
+    async fn get_mr_notes(&self, project_id: u64, mr_iid: u64) -> Result<Vec<Note>>;
     async fn create_mr_note(&self, project_id: u64, mr_iid: u64, body: &str) -> Result<Note>;
+    async fn create_issue_note(&self, project_id: u64, issue_iid: u64, body: &str) -> Result<Note>;
     async fn get_related_mrs(&self, project_id: u64, issue_iid: u64) -> Result<Vec<MergeRequest>>;
     async fn get_recent_pipelines(&self, project_id: u64, count: usize) -> Result<Vec<Pipeline>>;
+
+    // === P4 新增: CI 闭环控制 ===
+
+    /// 更新 MR (用于移除 Draft 状态)
+    async fn update_mr(&self, project_id: u64, mr_iid: u64, title: &str, draft: bool) -> Result<MergeRequest>;
+
+    /// 获取 pipeline 的 job 列表
+    async fn get_pipeline_jobs(&self, project_id: u64, pipeline_id: u64) -> Result<Vec<Job>>;
+
+    /// 获取 job 的原始日志
+    async fn get_job_log(&self, project_id: u64, job_id: u64) -> Result<String>;
 }
 
 // === 数据模型 ===
@@ -66,6 +78,15 @@ pub struct Pipeline {
     pub ref_: Option<String>,
     pub sha: Option<String>,
     pub web_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Job {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    pub stage: String,
+    pub web_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

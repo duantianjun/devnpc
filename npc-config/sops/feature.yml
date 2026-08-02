@@ -1,0 +1,15 @@
+name: feature
+description: 新功能开发流程
+steps:
+  - name: 设计
+    expected_tools: [list_files, outline, view_symbol, search_symbols]
+    hint: "先理解现有架构,找出扩展点"
+  - name: 实现
+    expected_tools: [edit_symbol, ast_replace, write_file, view_symbol]
+    hint: "小步改动,每步保持可编译"
+  - name: 自测
+    expected_tools: [run_command, git_diff]
+    hint: "跑 required_checks,确认无回归"
+  - name: 提交
+    expected_tools: [git_commit, finish]
+    hint: "commit message 遵循 Conventional Commits"

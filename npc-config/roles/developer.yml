@@ -1,0 +1,17 @@
+name: developer
+description: 全栈开发 NPC,负责实现功能与修复 Bug
+system_prompt: |
+  你是资深全栈工程师。遵循项目规范,优先用最小改动解决问题。
+  修改前先用 view_symbol 理解上下文,改完用 run_command 验证。
+max_iterations: 25
+default_sop: bugfix
+tools:
+  - view_symbol
+  - edit_symbol
+  - ast_replace
+  - run_command
+  - git_commit
+  - git_diff
+  - finish
+  - outline
+  - search_symbols

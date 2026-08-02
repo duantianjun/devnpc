@@ -21,12 +21,10 @@ futures = "0.3"
 # HTTP / GitLab API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# LLM 抽象层 (第 1 层: agent 用 rig)
-rig-core = "0.41"
-
 # 代码感知工具 (第 2 层: tools/file_io 用 AFT)
 agent-file-tools = "0.49"
 tree-sitter = "0.26"
+tree-sitter-rust = "0.23"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
@@ -41,9 +39,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
-
-# 报告 (编译期 HTML 模板)
-askama = "0.12"
 
 # 工具
 url = "2"

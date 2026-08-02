@@ -1,16 +1,57 @@
 //! 配置加载器: 环境变量 + .devnpc.md + 默认值三层合并
 //!
 //! 优先级 (高 → 低): 环境变量 > .devnpc.md > 内置默认。
-//! roles/sops YAML 加载放 P6。
+//! roles/sops YAML 从 npc-config/ 目录加载。
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::config::devnpc_md::{parse_devnpc_md, DevnpcMdFrontMatter, ParsedDevnpcMd};
 use crate::config::env;
 use crate::config::{
-    Config, GitlabConfig, Limits, LlmConfig, ProjectConfig, ReportConfig, ReportTarget, SopMode,
+    CiConfig, CommandConfig, Config, ContextConfig, GitlabConfig, Limits, LlmConfig,
+    LogParserConfig, ProjectConfig, ReadFileConfig, ReportConfig, ReportTarget, SopMode,
+    SummaryConfig,
 };
 use crate::error::{DevnpcError, Result};
+use crate::npc::role::Role;
+use crate::npc::sop::Sop;
+
+/// 加载 roles 目录下所有 *.yml 文件
+fn load_roles(roles_dir: &Path) -> Result<HashMap<String, Role>> {
+    let mut roles = HashMap::new();
+    if !roles_dir.exists() {
+        return Ok(roles);
+    }
+    for entry in std::fs::read_dir(roles_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+            let content = std::fs::read_to_string(&path)?;
+            let role: Role = serde_yaml::from_str(&content)?;
+            roles.insert(role.name.clone(), role);
+        }
+    }
+    Ok(roles)
+}
+
+/// 加载 sops 目录下所有 *.yml 文件
+fn load_sops(sops_dir: &Path) -> Result<HashMap<String, Sop>> {
+    let mut sops = HashMap::new();
+    if !sops_dir.exists() {
+        return Ok(sops);
+    }
+    for entry in std::fs::read_dir(sops_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+            let content = std::fs::read_to_string(&path)?;
+            let sop: Sop = serde_yaml::from_str(&content)?;
+            sops.insert(sop.name.clone(), sop);
+        }
+    }
+    Ok(sops)
+}
 
 /// 从指定 .devnpc.md 路径读取并解析,文件不存在返回默认
 fn read_devnpc_md(path: Option<&Path>) -> Result<ParsedDevnpcMd> {
@@ -65,7 +106,27 @@ fn load_internal(
     max_ci_var: &str,
     sop_mode_var: &str,
     report_target_var: &str,
+    model_routing_var: &str,
+    // 新增集中配置环境变量名
+    cmd_allowlist_var: &str,
+    cmd_denylist_var: &str,
+    default_timeout_var: &str,
+    read_file_max_lines_var: &str,
+    log_parser_max_failures_var: &str,
+    key_file_patterns_var: &str,
+    summary_readme_lines_var: &str,
+    summary_main_rs_lines_var: &str,
+    summary_other_lines_var: &str,
+    ctx_max_commits_var: &str,
+    ctx_max_pipelines_var: &str,
+    ctx_max_failures_var: &str,
+    ci_poll_interval_var: &str,
+    ci_poll_timeout_var: &str,
+    ci_pipeline_timeout_var: &str,
+    ci_max_retries_var: &str,
     devnpc_md_path: Option<&Path>,
+    roles_dir: Option<&Path>,
+    sops_dir: Option<&Path>,
 ) -> Result<Config> {
     // 1. 必需环境变量
     let api_key = env::get_required(api_key_var)?;
@@ -93,6 +154,76 @@ fn load_internal(
         project.sop_mode = mode;
     }
     let report_target = env::get_report_target(report_target_var)?.unwrap_or(ReportTarget::Artifact);
+    let model_routing = env::get_model_routing(model_routing_var)?.unwrap_or_default();
+
+    // 4. 加载 roles/sops YAML
+    let roles = match roles_dir {
+        Some(dir) => load_roles(dir)?,
+        None => HashMap::new(),
+    };
+    let sops = match sops_dir {
+        Some(dir) => load_sops(dir)?,
+        None => HashMap::new(),
+    };
+
+    // 5. 新增集中配置: 环境变量覆盖 → 默认值
+    let command = CommandConfig {
+        allowlist: env::get_vec(cmd_allowlist_var).unwrap_or_default(),
+        denylist: env::get_vec(cmd_denylist_var).unwrap_or_default(),
+        default_timeout_secs: env::get_u64(default_timeout_var)?.unwrap_or(120),
+    };
+    // 如果 allowlist/denylist 为空, 用默认值
+    let command = if command.allowlist.is_empty() && command.denylist.is_empty() {
+        CommandConfig::default()
+    } else {
+        CommandConfig {
+            allowlist: if command.allowlist.is_empty() {
+                CommandConfig::default().allowlist
+            } else {
+                command.allowlist
+            },
+            denylist: if command.denylist.is_empty() {
+                CommandConfig::default().denylist
+            } else {
+                command.denylist
+            },
+            default_timeout_secs: command.default_timeout_secs,
+        }
+    };
+
+    let read_file = ReadFileConfig {
+        max_lines: env::get_usize(read_file_max_lines_var)?.unwrap_or(200),
+    };
+
+    let log_parser = LogParserConfig {
+        max_failures: env::get_usize(log_parser_max_failures_var)?.unwrap_or(10),
+    };
+
+    let summary = {
+        let default_summary = SummaryConfig::default();
+        let patterns = env::get_vec(key_file_patterns_var)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(default_summary.key_file_patterns);
+        SummaryConfig {
+            key_file_patterns: patterns,
+            readme_lines: env::get_usize(summary_readme_lines_var)?.unwrap_or(default_summary.readme_lines),
+            main_rs_lines: env::get_usize(summary_main_rs_lines_var)?.unwrap_or(default_summary.main_rs_lines),
+            other_lines: env::get_usize(summary_other_lines_var)?.unwrap_or(default_summary.other_lines),
+        }
+    };
+
+    let context = ContextConfig {
+        max_recent_commits: env::get_usize(ctx_max_commits_var)?.unwrap_or(20),
+        max_recent_pipelines: env::get_usize(ctx_max_pipelines_var)?.unwrap_or(5),
+        max_ci_history_failures: env::get_usize(ctx_max_failures_var)?.unwrap_or(5),
+    };
+
+    let ci = CiConfig {
+        poll_interval_secs: env::get_u64(ci_poll_interval_var)?.unwrap_or(10),
+        poll_timeout_secs: env::get_u64(ci_poll_timeout_var)?.unwrap_or(300),
+        pipeline_timeout_secs: env::get_u64(ci_pipeline_timeout_var)?.unwrap_or(1800),
+        max_retries: env::get_u8(ci_max_retries_var)?.unwrap_or(3),
+    };
 
     Ok(Config {
         llm: LlmConfig {
@@ -110,15 +241,27 @@ fn load_internal(
             max_ci_retries,
         },
         project,
+        roles,
+        sops,
+        model_routing,
         report: ReportConfig {
             target: report_target,
         },
+        command,
+        read_file,
+        log_parser,
+        summary,
+        context,
+        ci,
     })
 }
 
 /// 生产环境配置加载 (使用标准环境变量名)
 pub fn load() -> Result<Config> {
-    let devnpc_md_path = std::env::current_dir().ok().map(|p| p.join(".devnpc.md"));
+    let cwd = std::env::current_dir().ok();
+    let devnpc_md_path = cwd.as_ref().map(|p| p.join(".devnpc.md"));
+    let roles_dir = cwd.as_ref().map(|p| p.join("npc-config").join("roles"));
+    let sops_dir = cwd.as_ref().map(|p| p.join("npc-config").join("sops"));
     load_internal(
         "DEVNPC_API_KEY",
         "DEVNPC_BASE_URL",
@@ -130,7 +273,27 @@ pub fn load() -> Result<Config> {
         "DEVNPC_MAX_CI_RETRIES",
         "DEVNPC_SOP_MODE",
         "DEVNPC_REPORT_TARGET",
+        "DEVNPC_MODEL_ROUTING",
+        // 新增集中配置环境变量名
+        "DEVNPC_COMMAND_ALLOWLIST",
+        "DEVNPC_COMMAND_DENYLIST",
+        "DEVNPC_DEFAULT_TIMEOUT_SECS",
+        "DEVNPC_READ_FILE_MAX_LINES",
+        "DEVNPC_LOG_PARSER_MAX_FAILURES",
+        "DEVNPC_KEY_FILE_PATTERNS",
+        "DEVNPC_SUMMARY_README_LINES",
+        "DEVNPC_SUMMARY_MAIN_RS_LINES",
+        "DEVNPC_SUMMARY_OTHER_LINES",
+        "DEVNPC_CONTEXT_MAX_COMMITS",
+        "DEVNPC_CONTEXT_MAX_PIPELINES",
+        "DEVNPC_CONTEXT_MAX_CI_FAILURES",
+        "DEVNPC_CI_POLL_INTERVAL_SECS",
+        "DEVNPC_CI_POLL_TIMEOUT_SECS",
+        "DEVNPC_CI_PIPELINE_TIMEOUT_SECS",
+        "DEVNPC_CI_MAX_RETRIES",
         devnpc_md_path.as_deref(),
+        roles_dir.as_deref(),
+        sops_dir.as_deref(),
     )
 }
 
@@ -179,7 +342,27 @@ mod tests {
             "DEVNPC_TEST_MERGE_MAX_CI_RETRIES",
             "DEVNPC_TEST_MERGE_SOP_MODE",
             "DEVNPC_TEST_MERGE_REPORT_TARGET",
+            "DEVNPC_TEST_MERGE_MODEL_ROUTING",
+            // 新参数: 不设置,使用默认值
+            "DEVNPC_TEST_MERGE_CMD_ALLOWLIST",
+            "DEVNPC_TEST_MERGE_CMD_DENYLIST",
+            "DEVNPC_TEST_MERGE_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_MERGE_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_MERGE_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_MERGE_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_MERGE_SUMMARY_README_LINES",
+            "DEVNPC_TEST_MERGE_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_MERGE_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_MERGE_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_MERGE_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_MERGE_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_MERGE_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_MERGE_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_MERGE_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_MERGE_CI_MAX_RETRIES",
             Some(&md_path),
+            None,
+            None,
         )
         .unwrap();
 
@@ -194,6 +377,14 @@ mod tests {
         assert!(config.project.guidelines_markdown.contains("# 规范"));
         // 报告默认 artifact
         assert_eq!(config.report.target, ReportTarget::Artifact);
+        // 模型路由默认
+        assert!(config.model_routing.simple_model.is_empty());
+        // 新增集中配置使用默认值
+        assert_eq!(config.command.default_timeout_secs, 120);
+        assert_eq!(config.read_file.max_lines, 200);
+        assert_eq!(config.log_parser.max_failures, 10);
+        assert_eq!(config.context.max_recent_commits, 20);
+        assert_eq!(config.ci.poll_interval_secs, 10);
 
         // 清理
         for key in [
@@ -225,6 +416,25 @@ mod tests {
             "DEVNPC_TEST_FAIL_MAX_CI_RETRIES",
             "DEVNPC_TEST_FAIL_SOP_MODE",
             "DEVNPC_TEST_FAIL_REPORT_TARGET",
+            "DEVNPC_TEST_FAIL_MODEL_ROUTING",
+            "DEVNPC_TEST_FAIL_CMD_ALLOWLIST",
+            "DEVNPC_TEST_FAIL_CMD_DENYLIST",
+            "DEVNPC_TEST_FAIL_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_FAIL_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_FAIL_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_FAIL_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_FAIL_SUMMARY_README_LINES",
+            "DEVNPC_TEST_FAIL_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_FAIL_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_FAIL_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_FAIL_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_FAIL_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_FAIL_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_FAIL_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_FAIL_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_FAIL_CI_MAX_RETRIES",
+            None,
+            None,
             None,
         );
         assert!(result.is_err());
@@ -258,6 +468,25 @@ mod tests {
             "DEVNPC_TEST_DEFAULT_MAX_CI_RETRIES",
             "DEVNPC_TEST_DEFAULT_SOP_MODE",
             "DEVNPC_TEST_DEFAULT_REPORT_TARGET",
+            "DEVNPC_TEST_DEFAULT_MODEL_ROUTING",
+            "DEVNPC_TEST_DEFAULT_CMD_ALLOWLIST",
+            "DEVNPC_TEST_DEFAULT_CMD_DENYLIST",
+            "DEVNPC_TEST_DEFAULT_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_DEFAULT_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_DEFAULT_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_DEFAULT_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_DEFAULT_SUMMARY_README_LINES",
+            "DEVNPC_TEST_DEFAULT_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_DEFAULT_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_DEFAULT_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_DEFAULT_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_DEFAULT_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_DEFAULT_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_DEFAULT_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_DEFAULT_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_DEFAULT_CI_MAX_RETRIES",
+            None,
+            None,
             None,
         )
         .unwrap();
@@ -267,6 +496,14 @@ mod tests {
         assert_eq!(config.project.sop_mode, SopMode::Soft);
         assert_eq!(config.project.branch_prefix, "npc");
         assert_eq!(config.report.target, ReportTarget::Artifact);
+        assert!(config.model_routing.simple_model.is_empty());
+        // 新增集中配置默认值
+        assert_eq!(config.command.default_timeout_secs, 120);
+        assert_eq!(config.read_file.max_lines, 200);
+        assert_eq!(config.log_parser.max_failures, 10);
+        assert_eq!(config.summary.readme_lines, 30);
+        assert_eq!(config.context.max_recent_commits, 20);
+        assert_eq!(config.ci.poll_interval_secs, 10);
 
         for key in [
             "DEVNPC_TEST_DEFAULT_API_KEY",
@@ -302,7 +539,26 @@ mod tests {
             "DEVNPC_TEST_MD_MAX_CI_RETRIES",
             "DEVNPC_TEST_MD_SOP_MODE",
             "DEVNPC_TEST_MD_REPORT_TARGET",
+            "DEVNPC_TEST_MD_MODEL_ROUTING",
+            "DEVNPC_TEST_MD_CMD_ALLOWLIST",
+            "DEVNPC_TEST_MD_CMD_DENYLIST",
+            "DEVNPC_TEST_MD_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_MD_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_MD_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_MD_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_MD_SUMMARY_README_LINES",
+            "DEVNPC_TEST_MD_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_MD_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_MD_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_MD_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_MD_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_MD_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_MD_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_MD_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_MD_CI_MAX_RETRIES",
             Some(&md_path),
+            None,
+            None,
         )
         .unwrap();
 
@@ -316,6 +572,113 @@ mod tests {
             "DEVNPC_TEST_MD_GITLAB_URL",
             "DEVNPC_TEST_MD_GITLAB_TOKEN",
             "DEVNPC_TEST_MD_PROJECT_ID",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn load_new_config_fields_from_env() {
+        std::env::set_var("DEVNPC_TEST_NEW_API_KEY", "sk");
+        std::env::set_var("DEVNPC_TEST_NEW_BASE_URL", "https://api.test.com/v1");
+        std::env::set_var("DEVNPC_TEST_NEW_MODEL", "m");
+        std::env::set_var("DEVNPC_TEST_NEW_GITLAB_URL", "https://gl.test.com");
+        std::env::set_var("DEVNPC_TEST_NEW_GITLAB_TOKEN", "t");
+        std::env::set_var("DEVNPC_TEST_NEW_PROJECT_ID", "1");
+        // 设置新配置
+        std::env::set_var("DEVNPC_TEST_NEW_CMD_ALLOWLIST", "cargo,rustc,echo");
+        std::env::set_var("DEVNPC_TEST_NEW_CMD_DENYLIST", "rm,curl");
+        std::env::set_var("DEVNPC_TEST_NEW_DEFAULT_TIMEOUT", "300");
+        std::env::set_var("DEVNPC_TEST_NEW_READ_FILE_MAX_LINES", "500");
+        std::env::set_var("DEVNPC_TEST_NEW_LOG_PARSER_MAX_FAILURES", "20");
+        std::env::set_var("DEVNPC_TEST_NEW_KEY_FILE_PATTERNS", "Cargo.toml,README.md");
+        std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_README_LINES", "50");
+        std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_MAIN_RS_LINES", "80");
+        std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_OTHER_LINES", "30");
+        std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_COMMITS", "50");
+        std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_PIPELINES", "10");
+        std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_FAILURES", "10");
+        std::env::set_var("DEVNPC_TEST_NEW_CI_POLL_INTERVAL", "5");
+        std::env::set_var("DEVNPC_TEST_NEW_CI_POLL_TIMEOUT", "600");
+        std::env::set_var("DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT", "3600");
+        std::env::set_var("DEVNPC_TEST_NEW_CI_MAX_RETRIES", "5");
+
+        let config = load_internal(
+            "DEVNPC_TEST_NEW_API_KEY",
+            "DEVNPC_TEST_NEW_BASE_URL",
+            "DEVNPC_TEST_NEW_MODEL",
+            "DEVNPC_TEST_NEW_GITLAB_URL",
+            "DEVNPC_TEST_NEW_GITLAB_TOKEN",
+            "DEVNPC_TEST_NEW_PROJECT_ID",
+            "DEVNPC_TEST_NEW_MAX_ITERATIONS",
+            "DEVNPC_TEST_NEW_MAX_CI_RETRIES",
+            "DEVNPC_TEST_NEW_SOP_MODE",
+            "DEVNPC_TEST_NEW_REPORT_TARGET",
+            "DEVNPC_TEST_NEW_MODEL_ROUTING",
+            "DEVNPC_TEST_NEW_CMD_ALLOWLIST",
+            "DEVNPC_TEST_NEW_CMD_DENYLIST",
+            "DEVNPC_TEST_NEW_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_NEW_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_NEW_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_NEW_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_NEW_SUMMARY_README_LINES",
+            "DEVNPC_TEST_NEW_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_NEW_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_NEW_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_NEW_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_NEW_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_NEW_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_NEW_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_NEW_CI_MAX_RETRIES",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // 验证新配置字段
+        assert_eq!(config.command.default_timeout_secs, 300);
+        assert!(config.command.allowlist.contains(&"cargo".to_string()));
+        assert!(config.command.denylist.contains(&"rm".to_string()));
+        assert_eq!(config.read_file.max_lines, 500);
+        assert_eq!(config.log_parser.max_failures, 20);
+        assert_eq!(config.summary.key_file_patterns.len(), 2);
+        assert_eq!(config.summary.readme_lines, 50);
+        assert_eq!(config.summary.main_rs_lines, 80);
+        assert_eq!(config.summary.other_lines, 30);
+        assert_eq!(config.context.max_recent_commits, 50);
+        assert_eq!(config.context.max_recent_pipelines, 10);
+        assert_eq!(config.context.max_ci_history_failures, 10);
+        assert_eq!(config.ci.poll_interval_secs, 5);
+        assert_eq!(config.ci.poll_timeout_secs, 600);
+        assert_eq!(config.ci.pipeline_timeout_secs, 3600);
+        assert_eq!(config.ci.max_retries, 5);
+
+        // 清理
+        for key in [
+            "DEVNPC_TEST_NEW_API_KEY",
+            "DEVNPC_TEST_NEW_BASE_URL",
+            "DEVNPC_TEST_NEW_MODEL",
+            "DEVNPC_TEST_NEW_GITLAB_URL",
+            "DEVNPC_TEST_NEW_GITLAB_TOKEN",
+            "DEVNPC_TEST_NEW_PROJECT_ID",
+            "DEVNPC_TEST_NEW_CMD_ALLOWLIST",
+            "DEVNPC_TEST_NEW_CMD_DENYLIST",
+            "DEVNPC_TEST_NEW_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_NEW_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_NEW_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_NEW_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_NEW_SUMMARY_README_LINES",
+            "DEVNPC_TEST_NEW_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_NEW_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_NEW_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_NEW_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_NEW_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_NEW_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_NEW_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_NEW_CI_MAX_RETRIES",
         ] {
             std::env::remove_var(key);
         }

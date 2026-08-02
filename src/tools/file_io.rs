@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::config::ReadFileConfig;
 use crate::error::{DevnpcError, Result};
 use crate::tools::{Tool, ToolResult};
 
@@ -50,11 +51,15 @@ struct ReadFileArgs {
 
 pub struct ReadFileTool {
     file_io: FileIo,
+    max_lines: usize,
 }
 
 impl ReadFileTool {
-    pub fn new(file_io: FileIo) -> Self {
-        Self { file_io }
+    pub fn new(file_io: FileIo, config: ReadFileConfig) -> Self {
+        Self {
+            file_io,
+            max_lines: config.max_lines,
+        }
     }
 }
 
@@ -86,8 +91,8 @@ impl Tool for ReadFileTool {
                 return Ok(ToolResult::err(format!("读取失败: {e}")));
             }
         };
-        // 限 200 行防 token 爆炸
-        let truncated: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
+        // 限 max_lines 行防 token 爆炸
+        let truncated: String = content.lines().take(self.max_lines).collect::<Vec<_>>().join("\n");
         Ok(ToolResult::ok(truncated))
     }
 }
@@ -197,13 +202,18 @@ impl Tool for ListFilesTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReadFileConfig;
     use tempfile::tempdir;
+
+    fn default_read_config() -> ReadFileConfig {
+        ReadFileConfig::default()
+    }
 
     #[tokio::test]
     async fn read_file_returns_content() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello\nworld").unwrap();
-        let tool = ReadFileTool::new(FileIo::new(dir.path()));
+        let tool = ReadFileTool::new(FileIo::new(dir.path()), default_read_config());
         let result = tool
             .call(&serde_json::json!({"path": "a.txt"}))
             .await
@@ -217,7 +227,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let content = (1..=300).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         std::fs::write(dir.path().join("big.txt"), content).unwrap();
-        let tool = ReadFileTool::new(FileIo::new(dir.path()));
+        let tool = ReadFileTool::new(FileIo::new(dir.path()), default_read_config());
         let result = tool
             .call(&serde_json::json!({"path": "big.txt"}))
             .await
@@ -229,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_rejects_path_traversal() {
         let dir = tempdir().unwrap();
-        let tool = ReadFileTool::new(FileIo::new(dir.path()));
+        let tool = ReadFileTool::new(FileIo::new(dir.path()), default_read_config());
         let result = tool
             .call(&serde_json::json!({"path": "../etc/passwd"}))
             .await;
@@ -240,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_returns_err_for_missing_file() {
         let dir = tempdir().unwrap();
-        let tool = ReadFileTool::new(FileIo::new(dir.path()));
+        let tool = ReadFileTool::new(FileIo::new(dir.path()), default_read_config());
         let result = tool
             .call(&serde_json::json!({"path": "nope.txt"}))
             .await

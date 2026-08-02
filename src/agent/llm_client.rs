@@ -2,17 +2,21 @@
 //!
 //! 设计偏离说明: P3 用 reqwest 而非 rig-core。MVP 单 provider (DeepSeek OpenAI 兼容),
 //! rig-core 抽象留 P8 模型路由。LlmClient 封装 provider 细节,P8 改造仅限本文件。
+//!
+//! P8: 新增 ModelRouter 按任务类型选择模型
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 
 use crate::agent::message::{LlmResponse, Message, ToolCall, ToolSchema};
 use crate::config::LlmConfig;
+use crate::config::ModelRoutingConfig;
 use crate::error::{DevnpcError, Result};
 
-/// LLM 客户端 (OpenAI 兼容)
+/// LLM 客户端 (OpenAI 兼容, P8 集成 ModelRouter)
 pub struct LlmClient {
     config: LlmConfig,
     http: reqwest::Client,
+    model_router: Option<ModelRouter>,
 }
 
 impl LlmClient {
@@ -20,25 +24,44 @@ impl LlmClient {
         Self {
             config,
             http: reqwest::Client::new(),
+            model_router: None,
         }
     }
 
+    /// 设置模型路由器 (P8)
+    pub fn with_model_router(mut self, router: ModelRouter) -> Self {
+        self.model_router = Some(router);
+        self
+    }
+
     /// 调用 LLM,返回文本 + 工具调用
+    ///
+    /// 如果设置了 ModelRouter 且提供了 task_kind,会根据任务类型选择模型;
+    /// 否则使用默认模型。
     pub async fn complete(
         &self,
         messages: &[Message],
         tools: &[ToolSchema],
+        task_kind: Option<&TaskKind>,
     ) -> Result<LlmResponse> {
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
 
+        // 根据任务类型选择模型
+        let model = match (task_kind, &self.model_router) {
+            (Some(kind), Some(router)) => {
+                router.select_model(kind).unwrap_or(&self.config.model)
+            }
+            _ => &self.config.model,
+        };
+
         // OpenAI 协议要求 tools 元素为 {"type":"function","function":{...}}
         let wrapped: Vec<ToolWrapper> =
             tools.iter().map(ToolWrapper::from).collect();
         let body = ChatCompletionsReq {
-            model: &self.config.model,
+            model,
             messages,
             tools: if wrapped.is_empty() { None } else { Some(&wrapped) },
             tool_choice: if tools.is_empty() { None } else { Some("auto") },
@@ -162,6 +185,78 @@ struct RawToolCallFunction {
     arguments: String,
 }
 
+// === 模型路由 (P8) ===
+
+/// 任务类型
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskKind {
+    Fix,
+    Test,
+    Implement,
+    Refactor,
+    Unknown,
+}
+
+impl TaskKind {
+    /// 从任务描述字符串推断任务类型
+    pub fn from_goal(goal: &str) -> Self {
+        let lower = goal.to_lowercase();
+        if lower.contains("fix") || lower.contains("bug") || lower.contains("修复") || lower.contains("hotfix") {
+            Self::Fix
+        } else if lower.contains("test") || lower.contains("测试") || lower.contains("unit") || lower.contains("集成") {
+            Self::Test
+        } else if lower.contains("refactor") || lower.contains("重构") || lower.contains("优化") {
+            Self::Refactor
+        } else if lower.contains("implement") || lower.contains("实现") || lower.contains("feature") || lower.contains("add") || lower.contains("新增") {
+            Self::Implement
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// 模型路由器 (P8)
+///
+/// 根据任务类型选择适合的模型:
+/// - 简单任务 (Fix, Test) → 使用便宜模型
+/// - 复杂任务 (Implement, Refactor, Unknown) → 使用强大模型
+#[derive(Debug, Clone)]
+pub struct ModelRouter {
+    simple_model: String,
+    complex_model: String,
+}
+
+impl ModelRouter {
+    pub fn new(config: &ModelRoutingConfig) -> Self {
+        Self {
+            simple_model: config.simple_model.clone(),
+            complex_model: config.complex_model.clone(),
+        }
+    }
+
+    /// 根据任务类型选择模型名
+    ///
+    /// 如果路由配置为空 (simple_model/complex_model 未设置),
+    /// 则返回 None,表示使用默认模型。
+    pub fn select_model(&self, kind: &TaskKind) -> Option<&str> {
+        if self.simple_model.is_empty() && self.complex_model.is_empty() {
+            return None;
+        }
+        match kind {
+            TaskKind::Fix | TaskKind::Test => {
+                if self.simple_model.is_empty() {
+                    Some(self.complex_model.as_str())
+                } else {
+                    Some(self.simple_model.as_str())
+                }
+            }
+            TaskKind::Implement | TaskKind::Refactor | TaskKind::Unknown => {
+                Some(self.complex_model.as_str())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,7 +293,7 @@ mod tests {
 
         let client = client_for(&server);
         let messages = vec![Message::user("hi")];
-        let resp = client.complete(&messages, &[]).await.unwrap();
+        let resp = client.complete(&messages, &[], None).await.unwrap();
         assert_eq!(resp.text, "任务已完成");
         assert!(resp.tool_calls.is_empty());
     }
@@ -232,7 +327,7 @@ mod tests {
 
         let client = client_for(&server);
         let resp = client
-            .complete(&[Message::user("read main")], &[])
+            .complete(&[Message::user("read main")], &[], None)
             .await
             .unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
@@ -251,7 +346,7 @@ mod tests {
             .await;
 
         let client = client_for(&server);
-        let result = client.complete(&[Message::user("hi")], &[]).await;
+        let result = client.complete(&[Message::user("hi")], &[], None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, DevnpcError::Llm(_)));
@@ -270,7 +365,7 @@ mod tests {
             .await;
 
         let client = client_for(&server);
-        let result = client.complete(&[Message::user("hi")], &[]).await;
+        let result = client.complete(&[Message::user("hi")], &[], None).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DevnpcError::Llm(_)));
     }
@@ -295,7 +390,7 @@ mod tests {
             description: "read".into(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let _ = client.complete(&[Message::user("hi")], &tools).await.unwrap();
+        let _ = client.complete(&[Message::user("hi")], &tools, None).await.unwrap();
         // body_partial_json 匹配器已验证请求体含 tools
     }
 }

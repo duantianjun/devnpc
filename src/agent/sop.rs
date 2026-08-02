@@ -1,10 +1,11 @@
 //! SOP 偏离检测 (方案 C 核心)
 //!
-//! 软约束 (soft): 偏离只记录,下轮提示 LLM;strict 模式留 P6。
+//! 软约束 (soft): 偏离只记录,下轮提示 LLM;strict 模式直接终止循环。
 
 use serde::Deserialize;
 
 use super::loop_::{Trajectory, TrajectoryEvent};
+use crate::config::SopMode;
 
 /// SOP 定义
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +31,11 @@ pub enum DeviationReport {
     None,
     /// 软约束偏离 (只警告,不阻断)
     Soft {
+        step: String,
+        unexpected_tools: Vec<String>,
+    },
+    /// 严格约束偏离 (终止循环)
+    Strict {
         step: String,
         unexpected_tools: Vec<String>,
     },
@@ -65,10 +71,13 @@ impl Sop {
     }
 
     /// 检查本轮 tool_calls 是否偏离当前步
+    ///
+    /// `mode` 决定返回 `Soft` 还是 `Strict` 偏离报告。
     pub fn check_deviation(
         &self,
         tool_calls: &[String],
         trajectory: &Trajectory,
+        mode: SopMode,
     ) -> DeviationReport {
         let current = self.estimate_current_step(trajectory);
         let unexpected: Vec<String> = tool_calls
@@ -77,12 +86,17 @@ impl Sop {
             .cloned()
             .collect();
         if unexpected.is_empty() {
-            DeviationReport::None
-        } else {
-            DeviationReport::Soft {
+            return DeviationReport::None;
+        }
+        match mode {
+            SopMode::Strict => DeviationReport::Strict {
                 step: current.name.clone(),
                 unexpected_tools: unexpected,
-            }
+            },
+            SopMode::Soft => DeviationReport::Soft {
+                step: current.name.clone(),
+                unexpected_tools: unexpected,
+            },
         }
     }
 }
@@ -90,6 +104,7 @@ impl Sop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SopMode;
 
     fn make_sop() -> Sop {
         Sop {
@@ -155,7 +170,7 @@ mod tests {
     fn check_deviation_none_when_tools_in_expected() {
         let sop = make_sop();
         let traj = Trajectory::default();
-        let report = sop.check_deviation(&["run_command".into()], &traj);
+        let report = sop.check_deviation(&["run_command".into()], &traj, SopMode::Soft);
         assert!(matches!(report, DeviationReport::None));
     }
 
@@ -163,7 +178,7 @@ mod tests {
     fn check_deviation_soft_when_unexpected_tool() {
         let sop = make_sop();
         let traj = Trajectory::default();
-        let report = sop.check_deviation(&["write_file".into()], &traj);
+        let report = sop.check_deviation(&["write_file".into()], &traj, SopMode::Soft);
         match report {
             DeviationReport::Soft {
                 step,
@@ -173,6 +188,23 @@ mod tests {
                 assert_eq!(unexpected_tools, vec!["write_file".to_string()]);
             }
             _ => panic!("expected Soft"),
+        }
+    }
+
+    #[test]
+    fn check_deviation_strict_when_unexpected_tool() {
+        let sop = make_sop();
+        let traj = Trajectory::default();
+        let report = sop.check_deviation(&["write_file".into()], &traj, SopMode::Strict);
+        match report {
+            DeviationReport::Strict {
+                step,
+                unexpected_tools,
+            } => {
+                assert_eq!(step, "复现");
+                assert_eq!(unexpected_tools, vec!["write_file".to_string()]);
+            }
+            _ => panic!("expected Strict"),
         }
     }
 }

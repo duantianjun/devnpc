@@ -116,10 +116,32 @@ mod tests {
                 created_at: "2026-08-01T00:00:00Z".into(),
             })
         }
+        async fn create_issue_note(&self, _p: u64, _i: u64, body: &str) -> Result<Note> {
+            self.notes.lock().unwrap().push((_i, 0, body.to_string()));
+            Ok(Note {
+                id: 999,
+                body: body.to_string(),
+                author: NoteAuthor {
+                    id: 1,
+                    username: "devnpc".into(),
+                    name: "devnpc".into(),
+                },
+                created_at: "2026-08-01T00:00:00Z".into(),
+            })
+        }
         async fn get_related_mrs(&self, _p: u64, _i: u64) -> Result<Vec<MergeRequest>> {
             unimplemented!("mock")
         }
         async fn get_recent_pipelines(&self, _p: u64, _c: usize) -> Result<Vec<Pipeline>> {
+            unimplemented!("mock")
+        }
+        async fn update_mr(&self, _p: u64, _i: u64, _t: &str, _d: bool) -> Result<MergeRequest> {
+            unimplemented!("mock")
+        }
+        async fn get_pipeline_jobs(&self, _p: u64, _pi: u64) -> Result<Vec<crate::gitlab_api::Job>> {
+            unimplemented!("mock")
+        }
+        async fn get_job_log(&self, _p: u64, _j: u64) -> Result<String> {
             unimplemented!("mock")
         }
     }
