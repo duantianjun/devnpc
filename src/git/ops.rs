@@ -9,6 +9,7 @@ use std::process::Command;
 use crate::error::{DevnpcError, Result};
 
 /// Git 操作封装
+#[derive(Clone)]
 pub struct GitOps {
     /// 工作目录
     pub workspace: PathBuf,

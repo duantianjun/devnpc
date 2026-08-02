@@ -8,7 +8,7 @@ pub mod pipelines;
 pub mod repo;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
@@ -40,7 +40,7 @@ pub trait GitlabApi: Send + Sync {
 
 // === 数据模型 ===
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Issue {
     pub iid: u64,
     pub title: String,
@@ -49,7 +49,7 @@ pub struct Issue {
     pub web_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MergeRequest {
     pub iid: u64,
     pub title: String,
@@ -70,7 +70,7 @@ pub struct CreateMrReq {
     pub draft: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Pipeline {
     pub id: u64,
     pub status: String,
@@ -80,7 +80,7 @@ pub struct Pipeline {
     pub web_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Job {
     pub id: u64,
     pub name: String,
@@ -89,7 +89,7 @@ pub struct Job {
     pub web_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Note {
     pub id: u64,
     pub body: String,
@@ -97,7 +97,7 @@ pub struct Note {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NoteAuthor {
     pub id: u64,
     pub username: String,

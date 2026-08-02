@@ -1,7 +1,7 @@
 [package]
 name = "devnpc"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "基于 GitLab 的企业级研发流程 AI 智能体"
 license = "MIT"
 
@@ -16,12 +16,26 @@ path = "src/lib.rs"
 [dependencies]
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
-futures = "0.3"
+futures = "0.3"            # TODO: 阶段 C 移除,由 adk-rust 内部使用
+
+# Agent 框架 (adk-rust)
+adk-rust = { version = "1", features = [
+    "minimal",                    # 核心: agents, models, gemini, runner, sessions
+    "openai", "anthropic", "deepseek",  # 其他模型提供商
+    "tools",                      # FunctionTool 系统
+    "graph",                      # 工作流编排
+    "mcp",                        # MCP 协议对接
+    "guardrail",                  # 安全护栏
+    "memory",                     # 框架级会话记忆
+    "rag",                        # 检索增强生成
+    "code",                       # 代码执行沙箱
+    "eval",                       # Agent 评估
+] }
 
 # HTTP / GitLab API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# 代码感知工具 (第 2 层: tools/file_io 用 AFT)
+# 代码感知工具 (AFT)
 agent-file-tools = "0.49"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.23"
@@ -42,16 +56,20 @@ anyhow = "1"
 
 # 工具
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 dotenvy = "0.15"
-async-trait = "0.1"
+async-trait = "0.1"     # TODO: 阶段 C 移除,由 adk-rust 提供
 
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.13"
 tempfile = "3"
 wiremock = "0.6"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("deepseek", "openai", "anthropic", "gemini"))'] }
 
 [profile.release]
 opt-level = 3

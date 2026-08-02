@@ -4,13 +4,9 @@ pub mod devnpc_md;
 pub mod env;
 pub mod loader;
 
-use std::collections::HashMap;
-
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::npc::role::Role;
-use crate::npc::sop::Sop;
 
 // ── 新增集中配置结构体 ──
 
@@ -134,8 +130,6 @@ pub struct Config {
     pub gitlab: GitlabConfig,
     pub limits: Limits,
     pub project: ProjectConfig,
-    pub roles: HashMap<String, Role>,
-    pub sops: HashMap<String, Sop>,
     pub model_routing: ModelRoutingConfig,
     pub report: ReportConfig,
     /// 命令执行配置 (shell.rs)
@@ -157,6 +151,13 @@ pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    /// 模型提供商: "deepseek" | "openai" | "anthropic" | "gemini"
+    #[serde(default = "default_provider")]
+    pub provider: String,
+}
+
+fn default_provider() -> String {
+    "deepseek".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,7 +183,7 @@ impl Default for Limits {
 }
 
 /// SOP 约束模式
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SopMode {
     #[default]
@@ -191,7 +192,7 @@ pub enum SopMode {
 }
 
 /// .devnpc.md 解析结果
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ProjectConfig {
     pub sop_mode: SopMode,
     pub forbidden_paths: Vec<String>,

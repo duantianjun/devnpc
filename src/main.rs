@@ -1,7 +1,17 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 
+use adk_rust::agent::LlmAgentBuilder;
+use adk_rust::runner::Runner;
+use adk_rust::session::CreateRequest;
+use adk_rust::{Content, SessionId, UserId};
+
+use devnpc::adapter::callbacks::DevnpcCallbacks;
+use devnpc::adapter::context::{build_initial_state, create_session_service};
+use devnpc::adapter::provider::create_model;
+use devnpc::adapter::tools::create_all_tools;
 use devnpc::ci::controller::{CiController, CiOutcome, FixHandler};
 use devnpc::ci::log_parser::ParsedFailure;
 use devnpc::config::Config;
@@ -10,9 +20,7 @@ use devnpc::git::ops::GitOps;
 use devnpc::gitlab_api::client::GitlabClient;
 use devnpc::gitlab_api::GitlabApi;
 use devnpc::memory::context::Context;
-use devnpc::npc::role::Role;
-use devnpc::npc::runner::NpcRunner;
-use devnpc::report::collector::{CostEstimate, ReportData, TrajectorySummary};
+use devnpc::report::collector::{CostEstimate, ReportData, Trajectory, TrajectoryEvent, TrajectorySummary};
 use devnpc::report::publisher;
 use devnpc::trigger::parser::{classify_task, parse_mention, Trigger};
 
@@ -65,14 +73,23 @@ async fn main() -> Result<()> {
     }
 }
 
-/// 主运行流程 (P5 完整实现):
+/// 系统指令 (通用开发工程师角色)
+const SYSTEM_INSTRUCTION: &str = "\
+你是一个 Rust 开发工程师。使用 devnpc 工具链完成研发任务。\n\
+遵循以下原则:\n\
+1. 修改前先理解上下文 (read_file / list_files / aft_outline)\n\
+2. 改完后用 cargo build 验证编译\n\
+3. 完成后总结你的工作成果\n\
+4. 禁止修改工作目录外的文件";
+
+/// 主运行流程 (基于 adk-rust):
 ///
 /// 1. 加载配置
 /// 2. 创建 GitLab 客户端
 /// 3. dry_run 模式: 打印配置后退出
 /// 4. 解析触发源 (CI env vars / --task)
 /// 5. 构建上下文 (Context::build)
-/// 6. 创建 NPC runner 并执行
+/// 6. 创建 LlmAgent 并执行
 /// 7. 若分支已推送: CI 控制器 → 创建 MR → 轮询 pipeline → 修复
 /// 8. 生成报告 → 发布 → 评论 MR
 async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
@@ -126,61 +143,160 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         None
     };
 
-    if let Some(context) = context {
-        // 6. 创建 NPC runner 并执行
-        let role = Role {
-            name: "developer".into(),
-            description: "通用开发工程师".into(),
-            system_prompt: "你是一个 Rust 开发工程师。使用 devnpc 工具链完成研发任务。\n\
-                遵循以下原则:\n\
-                1. 修改前先理解上下文 (read_file / list_files / aft_outline)\n\
-                2. 改完后用 cargo build 验证编译\n\
-                3. 完成后调用 finish 工具,summary 写验收摘要\n\
-                4. 禁止修改工作目录外的文件"
-                .into(),
-            max_iterations: config.limits.max_iterations,
-            default_sop: None,
-            tools: vec![],
-        };
-        let runner = NpcRunner::new(role);
-        let npc_result = runner.execute(&task_spec, &context, &config).await?;
-        tracing::info!(summary = %npc_result.summary, branch = %npc_result.branch, "NPC 执行完成");
+    // 6. 创建 LlmAgent 并执行
+    let start_time = chrono::Utc::now();
 
-        // 7. CI 控制器: 创建 MR → 轮询 pipeline → 修复
-        let ci_outcome = run_ci_controller(
-            &*gitlab,
-            &config,
-            &npc_result.branch,
-            &npc_result.summary,
-            mr_iid,
-            &context,
-        )
-        .await?;
+    // 创建模型
+    let model = create_model(&config.llm)?;
 
-        // 8. 生成报告并发布
-        let report_data = build_report(&npc_result, &ci_outcome);
-        let html = devnpc::report::html::generate_html(&report_data);
-        let report_url = publisher::publish(&html, &config.report.target).await?;
-        tracing::info!(report_url = %report_url, "报告已发布");
+    // 创建工具
+    let tools = create_all_tools(
+        &config,
+        Some(gitlab.clone()),
+        Some(config.gitlab.project_id),
+    );
 
-        // 9. 评论 MR 或输出结果
-        let summary_text = format!(
-            "## devnpc 执行报告\n\n**状态**: {}\n**摘要**: {}\n\n**分支**: {}\n**报告**: {}",
-            report_data.status,
-            npc_result.summary,
-            npc_result.branch,
-            report_url,
-        );
-        println!("{}", summary_text);
+    // 创建回调
+    let callbacks = DevnpcCallbacks::new();
 
-        if let Some(mr_iid) = mr_iid {
-            gitlab
-                .create_mr_note(config.gitlab.project_id, mr_iid, &summary_text)
-                .await?;
-            tracing::info!(mr_iid = mr_iid, "评论已发布到 MR");
+    // 构建 Agent
+    let agent = LlmAgentBuilder::new("devnpc")
+        .instruction(SYSTEM_INSTRUCTION)
+        .model(model)
+        .before_tool_callback(callbacks.before_tool_callback())
+        .after_model_callback(callbacks.after_model_callback());
+
+    // 逐个添加工具
+    let agent = tools.into_iter().fold(agent, |builder, tool| {
+        builder.tool(tool)
+    });
+
+    let agent = agent.build().map_err(|e| {
+        devnpc::error::DevnpcError::Config(format!("Agent 构建失败: {e}"))
+    })?;
+
+    // 创建 SessionService 和初始状态
+    let (session_service, session_id) = create_session_service();
+    let initial_state = context.as_ref().map(build_initial_state).unwrap_or_default();
+
+    // 创建会话
+    session_service
+        .create(CreateRequest {
+            app_name: "devnpc".to_string(),
+            user_id: "devnpc".to_string(),
+            session_id: Some(session_id.clone()),
+            state: initial_state,
+        })
+        .await
+        .map_err(|e| devnpc::error::DevnpcError::Config(format!("会话创建失败: {e}")))?;
+
+    // 创建 Runner
+    let runner = Runner::builder()
+        .app_name("devnpc")
+        .agent(Arc::new(agent))
+        .session_service(session_service)
+        .build()
+        .map_err(|e| devnpc::error::DevnpcError::Config(format!("Runner 构建失败: {e}")))?;
+
+    // 执行 Agent
+    let content = Content::new("user").with_text(&task_spec.description);
+    let user_id = UserId::new("devnpc").map_err(|e| {
+        devnpc::error::DevnpcError::Config(format!("UserId 创建失败: {e}"))
+    })?;
+    let session_id_typed = SessionId::try_from(session_id.as_str()).map_err(|e| {
+        devnpc::error::DevnpcError::Config(format!("SessionId 创建失败: {e}"))
+    })?;
+    let mut stream = runner
+        .run(user_id, session_id_typed, content)
+        .await
+        .map_err(|e| devnpc::error::DevnpcError::Config(format!("Agent 执行失败: {e}")))?;
+
+    // 收集执行结果
+    let mut trajectory = Trajectory::new();
+    let mut final_text = String::new();
+
+    while let Some(event_result) = stream.next().await {
+        match event_result {
+            Ok(event) => {
+                // 记录 LLM 调用 (只要有 content 就算一次调用)
+                if event.llm_response.content.is_some() {
+                    trajectory.record_llm_call(trajectory.events.len());
+                }
+
+                // 记录工具调用 (通过 content 中的 FunctionCall 判断)
+                if let Some(content) = &event.llm_response.content {
+                    let has_tool_call = content.parts.iter().any(|part| {
+                        matches!(part, adk_rust::Part::FunctionCall { .. })
+                    });
+                    if has_tool_call {
+                        trajectory.record_tool_call("unknown", true);
+                    }
+                }
+
+                // 收集最终响应文本
+                if event.is_final_response() && let Some(content) = &event.llm_response.content {
+                    for part in &content.parts {
+                        if let Some(text) = part.text() {
+                            final_text.push_str(text);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Agent 事件流错误");
+            }
         }
+    }
+
+    let end_time = chrono::Utc::now();
+    let summary = if final_text.is_empty() {
+        task_spec.description.clone()
     } else {
-        tracing::error!("缺少 Issue 上下文,无法执行 NPC 任务");
+        final_text
+    };
+
+    tracing::info!(summary = %summary, "Agent 执行完成");
+
+    // 7. CI 控制器: 创建 MR → 轮询 pipeline → 修复
+    let branch = format!("{}/{}", config.project.branch_prefix, chrono::Utc::now().format("%Y%m%d%H%M%S"));
+    let ci_outcome = run_ci_controller(
+        &*gitlab,
+        &config,
+        &branch,
+        &summary,
+        mr_iid,
+        &context,
+    )
+    .await?;
+
+    // 8. 生成报告并发布
+    let report_data = build_report(
+        &trajectory,
+        &summary,
+        &ci_outcome,
+        &task_spec.description,
+        start_time,
+        end_time,
+    );
+    let html = devnpc::report::html::generate_html(&report_data);
+    let report_url = publisher::publish(&html, &config.report.target).await?;
+    tracing::info!(report_url = %report_url, "报告已发布");
+
+    // 9. 评论 MR 或输出结果
+    let summary_text = format!(
+        "## devnpc 执行报告\n\n**状态**: {}\n**摘要**: {}\n\n**分支**: {}\n**报告**: {}",
+        report_data.status,
+        summary,
+        branch,
+        report_url,
+    );
+    println!("{}", summary_text);
+
+    if let Some(mr_iid) = mr_iid {
+        gitlab
+            .create_mr_note(config.gitlab.project_id, mr_iid, &summary_text)
+            .await?;
+        tracing::info!(mr_iid = mr_iid, "评论已发布到 MR");
     }
 
     Ok(())
@@ -255,7 +371,7 @@ async fn run_ci_controller(
     branch: &str,
     summary: &str,
     _mr_iid: Option<u64>,
-    _context: &Context,
+    _context: &Option<Context>,
 ) -> Result<CiOutcome> {
     // 创建 MR (如果当前没有关联 MR)
     let create_req = devnpc::gitlab_api::CreateMrReq {
@@ -308,45 +424,85 @@ async fn run_ci_controller(
 
 /// 构建报告数据
 fn build_report(
-    npc_result: &devnpc::npc::runner::NpcResult,
+    trajectory: &Trajectory,
+    summary: &str,
     ci_outcome: &CiOutcome,
+    task_description: &str,
+    start_time: chrono::DateTime<chrono::Utc>,
+    end_time: chrono::DateTime<chrono::Utc>,
 ) -> ReportData {
-    let llm_calls = npc_result
-        .trajectory
+    let llm_calls = trajectory
         .events
         .iter()
-        .filter(|e| matches!(e, devnpc::agent::loop_::TrajectoryEvent::LlmCall { .. }))
+        .filter(|e| matches!(e, TrajectoryEvent::LlmCall { .. }))
         .count() as u32;
-    let tool_calls = npc_result
-        .trajectory
+    let tool_calls = trajectory
         .events
         .iter()
-        .filter(|e| matches!(e, devnpc::agent::loop_::TrajectoryEvent::ToolCall { .. }))
+        .filter(|e| matches!(e, TrajectoryEvent::ToolCall { .. }))
         .count() as u32;
 
-    let (status, ci_retries) = match ci_outcome {
-        CiOutcome::Passed { attempts, .. } => ("success".into(), *attempts),
-        CiOutcome::Failed { attempts, .. } => ("failed".into(), *attempts),
-        CiOutcome::Timeout { .. } => ("timeout".into(), 0),
+    let (status, mr_iid, pipeline_id, ci_retries, mr_url, ci_url) = match ci_outcome {
+        CiOutcome::Passed {
+            mr_iid,
+            pipeline_id,
+            attempts,
+        } => (
+            "passed".into(),
+            Some(*mr_iid),
+            Some(*pipeline_id),
+            *attempts,
+            None,
+            Some(format!("pipeline #{pipeline_id}")),
+        ),
+        CiOutcome::Failed {
+            mr_iid,
+            last_error,
+            attempts,
+        } => (
+            format!("failed: {last_error}"),
+            Some(*mr_iid),
+            None,
+            *attempts,
+            None,
+            None,
+        ),
+        CiOutcome::Timeout { mr_iid, stage } => (
+            format!("timeout: {stage}"),
+            Some(*mr_iid),
+            None,
+            0,
+            None,
+            None,
+        ),
     };
+
+    let duration_secs = (end_time - start_time).num_seconds().max(0) as u64;
+    let input_tokens = llm_calls as u64 * 500;
+    let output_tokens = llm_calls as u64 * 200;
+    let estimated_cost_usd = (input_tokens as f64 * 0.000_001_5) + (output_tokens as f64 * 0.000_002_0);
 
     ReportData {
         status,
-        duration_secs: 0,
-        token_total: 0,
+        duration_secs,
+        token_total: input_tokens + output_tokens,
         llm_calls,
         tool_calls,
         ci_retries,
-        mr_url: None,
-        ci_url: None,
-        summary: npc_result.summary.clone(),
-        task_description: String::new(),
+        mr_url,
+        ci_url,
+        summary: summary.to_string(),
+        task_description: task_description.to_string(),
         trajectory: TrajectorySummary::default(),
-        cost_estimate: CostEstimate::default(),
-        mr_iid: None,
-        pipeline_id: None,
-        started_at: String::new(),
-        finished_at: String::new(),
+        cost_estimate: CostEstimate {
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd,
+        },
+        mr_iid,
+        pipeline_id,
+        started_at: start_time.to_rfc3339(),
+        finished_at: end_time.to_rfc3339(),
     }
 }
 
@@ -406,5 +562,5 @@ fn print_info() {
     println!("devnpc {}", env!("CARGO_PKG_VERSION"));
     println!("基于 GitLab 的企业级研发流程 AI 智能体");
     println!();
-    println!("全部阶段已实现: P0 骨架 → P1 配置 → P2 记忆 → P3 Agent → P3.5 AFT → P4 CI闭环 → P5 触发 → P6 Role/SOP/Team → P7 报告 → P8 模型路由");
+    println!("基于 adk-rust 框架: LlmAgent + Runner + FunctionTool");
 }

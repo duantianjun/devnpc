@@ -1,9 +1,7 @@
 //! 配置加载器: 环境变量 + .devnpc.md + 默认值三层合并
 //!
 //! 优先级 (高 → 低): 环境变量 > .devnpc.md > 内置默认。
-//! roles/sops YAML 从 npc-config/ 目录加载。
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::config::devnpc_md::{parse_devnpc_md, DevnpcMdFrontMatter, ParsedDevnpcMd};
@@ -14,44 +12,6 @@ use crate::config::{
     SummaryConfig,
 };
 use crate::error::{DevnpcError, Result};
-use crate::npc::role::Role;
-use crate::npc::sop::Sop;
-
-/// 加载 roles 目录下所有 *.yml 文件
-fn load_roles(roles_dir: &Path) -> Result<HashMap<String, Role>> {
-    let mut roles = HashMap::new();
-    if !roles_dir.exists() {
-        return Ok(roles);
-    }
-    for entry in std::fs::read_dir(roles_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
-            let content = std::fs::read_to_string(&path)?;
-            let role: Role = serde_yaml::from_str(&content)?;
-            roles.insert(role.name.clone(), role);
-        }
-    }
-    Ok(roles)
-}
-
-/// 加载 sops 目录下所有 *.yml 文件
-fn load_sops(sops_dir: &Path) -> Result<HashMap<String, Sop>> {
-    let mut sops = HashMap::new();
-    if !sops_dir.exists() {
-        return Ok(sops);
-    }
-    for entry in std::fs::read_dir(sops_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
-            let content = std::fs::read_to_string(&path)?;
-            let sop: Sop = serde_yaml::from_str(&content)?;
-            sops.insert(sop.name.clone(), sop);
-        }
-    }
-    Ok(sops)
-}
 
 /// 从指定 .devnpc.md 路径读取并解析,文件不存在返回默认
 fn read_devnpc_md(path: Option<&Path>) -> Result<ParsedDevnpcMd> {
@@ -125,8 +85,6 @@ fn load_internal(
     ci_pipeline_timeout_var: &str,
     ci_max_retries_var: &str,
     devnpc_md_path: Option<&Path>,
-    roles_dir: Option<&Path>,
-    sops_dir: Option<&Path>,
 ) -> Result<Config> {
     // 1. 必需环境变量
     let api_key = env::get_required(api_key_var)?;
@@ -156,17 +114,7 @@ fn load_internal(
     let report_target = env::get_report_target(report_target_var)?.unwrap_or(ReportTarget::Artifact);
     let model_routing = env::get_model_routing(model_routing_var)?.unwrap_or_default();
 
-    // 4. 加载 roles/sops YAML
-    let roles = match roles_dir {
-        Some(dir) => load_roles(dir)?,
-        None => HashMap::new(),
-    };
-    let sops = match sops_dir {
-        Some(dir) => load_sops(dir)?,
-        None => HashMap::new(),
-    };
-
-    // 5. 新增集中配置: 环境变量覆盖 → 默认值
+    // 4. 新增集中配置: 环境变量覆盖 → 默认值
     let command = CommandConfig {
         allowlist: env::get_vec(cmd_allowlist_var).unwrap_or_default(),
         denylist: env::get_vec(cmd_denylist_var).unwrap_or_default(),
@@ -230,6 +178,7 @@ fn load_internal(
             api_key,
             base_url,
             model,
+            provider: "deepseek".to_string(),
         },
         gitlab: GitlabConfig {
             url: gitlab_url,
@@ -241,8 +190,6 @@ fn load_internal(
             max_ci_retries,
         },
         project,
-        roles,
-        sops,
         model_routing,
         report: ReportConfig {
             target: report_target,
@@ -260,8 +207,6 @@ fn load_internal(
 pub fn load() -> Result<Config> {
     let cwd = std::env::current_dir().ok();
     let devnpc_md_path = cwd.as_ref().map(|p| p.join(".devnpc.md"));
-    let roles_dir = cwd.as_ref().map(|p| p.join("npc-config").join("roles"));
-    let sops_dir = cwd.as_ref().map(|p| p.join("npc-config").join("sops"));
     load_internal(
         "DEVNPC_API_KEY",
         "DEVNPC_BASE_URL",
@@ -292,8 +237,6 @@ pub fn load() -> Result<Config> {
         "DEVNPC_CI_PIPELINE_TIMEOUT_SECS",
         "DEVNPC_CI_MAX_RETRIES",
         devnpc_md_path.as_deref(),
-        roles_dir.as_deref(),
-        sops_dir.as_deref(),
     )
 }
 
@@ -317,15 +260,15 @@ mod tests {
     #[test]
     fn merge_env_overrides_devnpc_md_overrides_defaults() {
         // 设环境变量
-        std::env::set_var("DEVNPC_TEST_MERGE_API_KEY", "sk-merge");
-        std::env::set_var("DEVNPC_TEST_MERGE_BASE_URL", "https://api.test.com/v1");
-        std::env::set_var("DEVNPC_TEST_MERGE_MODEL", "test-model");
-        std::env::set_var("DEVNPC_TEST_MERGE_GITLAB_URL", "https://gitlab.test.com");
-        std::env::set_var("DEVNPC_TEST_MERGE_GITLAB_TOKEN", "gl-token");
-        std::env::set_var("DEVNPC_TEST_MERGE_PROJECT_ID", "42");
-        std::env::set_var("DEVNPC_TEST_MERGE_MAX_ITERATIONS", "30");
-        std::env::set_var("DEVNPC_TEST_MERGE_MAX_CI_RETRIES", "5");
-        std::env::set_var("DEVNPC_TEST_MERGE_SOP_MODE", "strict");
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_API_KEY", "sk-merge"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_BASE_URL", "https://api.test.com/v1"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_MODEL", "test-model"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_GITLAB_URL", "https://gitlab.test.com"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_GITLAB_TOKEN", "gl-token"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_PROJECT_ID", "42"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_MAX_ITERATIONS", "30"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_MAX_CI_RETRIES", "5"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MERGE_SOP_MODE", "strict"); }
 
         let md_path = write_devnpc_md(
             "---\nsop_mode: soft\nmax_ci_retries: 2\nbranch_prefix: \"npc\"\n---\n# 规范\n",
@@ -361,8 +304,6 @@ mod tests {
             "DEVNPC_TEST_MERGE_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_MERGE_CI_MAX_RETRIES",
             Some(&md_path),
-            None,
-            None,
         )
         .unwrap();
 
@@ -398,13 +339,13 @@ mod tests {
             "DEVNPC_TEST_MERGE_MAX_CI_RETRIES",
             "DEVNPC_TEST_MERGE_SOP_MODE",
         ] {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key); }
         }
     }
 
     #[test]
     fn load_fails_when_required_llm_env_missing() {
-        std::env::remove_var("DEVNPC_TEST_FAIL_API_KEY");
+        unsafe { std::env::remove_var("DEVNPC_TEST_FAIL_API_KEY"); }
         let result = load_internal(
             "DEVNPC_TEST_FAIL_API_KEY",
             "DEVNPC_TEST_FAIL_BASE_URL",
@@ -434,8 +375,6 @@ mod tests {
             "DEVNPC_TEST_FAIL_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_FAIL_CI_MAX_RETRIES",
             None,
-            None,
-            None,
         );
         assert!(result.is_err());
         assert!(matches!(
@@ -446,16 +385,16 @@ mod tests {
 
     #[test]
     fn load_uses_defaults_when_optional_missing() {
-        std::env::set_var("DEVNPC_TEST_DEFAULT_API_KEY", "sk");
-        std::env::set_var("DEVNPC_TEST_DEFAULT_BASE_URL", "https://api.test.com/v1");
-        std::env::set_var("DEVNPC_TEST_DEFAULT_MODEL", "m");
-        std::env::set_var("DEVNPC_TEST_DEFAULT_GITLAB_URL", "https://gl.test.com");
-        std::env::set_var("DEVNPC_TEST_DEFAULT_GITLAB_TOKEN", "t");
-        std::env::set_var("DEVNPC_TEST_DEFAULT_PROJECT_ID", "1");
-        std::env::remove_var("DEVNPC_TEST_DEFAULT_MAX_ITERATIONS");
-        std::env::remove_var("DEVNPC_TEST_DEFAULT_MAX_CI_RETRIES");
-        std::env::remove_var("DEVNPC_TEST_DEFAULT_SOP_MODE");
-        std::env::remove_var("DEVNPC_TEST_DEFAULT_REPORT_TARGET");
+        unsafe { std::env::set_var("DEVNPC_TEST_DEFAULT_API_KEY", "sk"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DEFAULT_BASE_URL", "https://api.test.com/v1"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DEFAULT_MODEL", "m"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DEFAULT_GITLAB_URL", "https://gl.test.com"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DEFAULT_GITLAB_TOKEN", "t"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DEFAULT_PROJECT_ID", "1"); }
+        unsafe { std::env::remove_var("DEVNPC_TEST_DEFAULT_MAX_ITERATIONS"); }
+        unsafe { std::env::remove_var("DEVNPC_TEST_DEFAULT_MAX_CI_RETRIES"); }
+        unsafe { std::env::remove_var("DEVNPC_TEST_DEFAULT_SOP_MODE"); }
+        unsafe { std::env::remove_var("DEVNPC_TEST_DEFAULT_REPORT_TARGET"); }
 
         let config = load_internal(
             "DEVNPC_TEST_DEFAULT_API_KEY",
@@ -486,8 +425,6 @@ mod tests {
             "DEVNPC_TEST_DEFAULT_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_DEFAULT_CI_MAX_RETRIES",
             None,
-            None,
-            None,
         )
         .unwrap();
 
@@ -513,19 +450,19 @@ mod tests {
             "DEVNPC_TEST_DEFAULT_GITLAB_TOKEN",
             "DEVNPC_TEST_DEFAULT_PROJECT_ID",
         ] {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key); }
         }
     }
 
     #[test]
     fn load_uses_devnpc_md_max_ci_retries_when_env_missing() {
-        std::env::set_var("DEVNPC_TEST_MD_API_KEY", "sk");
-        std::env::set_var("DEVNPC_TEST_MD_BASE_URL", "https://api.test.com/v1");
-        std::env::set_var("DEVNPC_TEST_MD_MODEL", "m");
-        std::env::set_var("DEVNPC_TEST_MD_GITLAB_URL", "https://gl.test.com");
-        std::env::set_var("DEVNPC_TEST_MD_GITLAB_TOKEN", "t");
-        std::env::set_var("DEVNPC_TEST_MD_PROJECT_ID", "1");
-        std::env::remove_var("DEVNPC_TEST_MD_MAX_CI_RETRIES");
+        unsafe { std::env::set_var("DEVNPC_TEST_MD_API_KEY", "sk"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MD_BASE_URL", "https://api.test.com/v1"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MD_MODEL", "m"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MD_GITLAB_URL", "https://gl.test.com"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MD_GITLAB_TOKEN", "t"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_MD_PROJECT_ID", "1"); }
+        unsafe { std::env::remove_var("DEVNPC_TEST_MD_MAX_CI_RETRIES"); }
 
         let md_path = write_devnpc_md("---\nmax_ci_retries: 7\n---\n正文");
         let config = load_internal(
@@ -557,8 +494,6 @@ mod tests {
             "DEVNPC_TEST_MD_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_MD_CI_MAX_RETRIES",
             Some(&md_path),
-            None,
-            None,
         )
         .unwrap();
 
@@ -573,35 +508,35 @@ mod tests {
             "DEVNPC_TEST_MD_GITLAB_TOKEN",
             "DEVNPC_TEST_MD_PROJECT_ID",
         ] {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key); }
         }
     }
 
     #[test]
     fn load_new_config_fields_from_env() {
-        std::env::set_var("DEVNPC_TEST_NEW_API_KEY", "sk");
-        std::env::set_var("DEVNPC_TEST_NEW_BASE_URL", "https://api.test.com/v1");
-        std::env::set_var("DEVNPC_TEST_NEW_MODEL", "m");
-        std::env::set_var("DEVNPC_TEST_NEW_GITLAB_URL", "https://gl.test.com");
-        std::env::set_var("DEVNPC_TEST_NEW_GITLAB_TOKEN", "t");
-        std::env::set_var("DEVNPC_TEST_NEW_PROJECT_ID", "1");
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_API_KEY", "sk"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_BASE_URL", "https://api.test.com/v1"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_MODEL", "m"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_GITLAB_URL", "https://gl.test.com"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_GITLAB_TOKEN", "t"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_PROJECT_ID", "1"); }
         // 设置新配置
-        std::env::set_var("DEVNPC_TEST_NEW_CMD_ALLOWLIST", "cargo,rustc,echo");
-        std::env::set_var("DEVNPC_TEST_NEW_CMD_DENYLIST", "rm,curl");
-        std::env::set_var("DEVNPC_TEST_NEW_DEFAULT_TIMEOUT", "300");
-        std::env::set_var("DEVNPC_TEST_NEW_READ_FILE_MAX_LINES", "500");
-        std::env::set_var("DEVNPC_TEST_NEW_LOG_PARSER_MAX_FAILURES", "20");
-        std::env::set_var("DEVNPC_TEST_NEW_KEY_FILE_PATTERNS", "Cargo.toml,README.md");
-        std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_README_LINES", "50");
-        std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_MAIN_RS_LINES", "80");
-        std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_OTHER_LINES", "30");
-        std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_COMMITS", "50");
-        std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_PIPELINES", "10");
-        std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_FAILURES", "10");
-        std::env::set_var("DEVNPC_TEST_NEW_CI_POLL_INTERVAL", "5");
-        std::env::set_var("DEVNPC_TEST_NEW_CI_POLL_TIMEOUT", "600");
-        std::env::set_var("DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT", "3600");
-        std::env::set_var("DEVNPC_TEST_NEW_CI_MAX_RETRIES", "5");
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CMD_ALLOWLIST", "cargo,rustc,echo"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CMD_DENYLIST", "rm,curl"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_DEFAULT_TIMEOUT", "300"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_READ_FILE_MAX_LINES", "500"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_LOG_PARSER_MAX_FAILURES", "20"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_KEY_FILE_PATTERNS", "Cargo.toml,README.md"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_README_LINES", "50"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_MAIN_RS_LINES", "80"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_SUMMARY_OTHER_LINES", "30"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_COMMITS", "50"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_PIPELINES", "10"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CTX_MAX_FAILURES", "10"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CI_POLL_INTERVAL", "5"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CI_POLL_TIMEOUT", "600"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT", "3600"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_NEW_CI_MAX_RETRIES", "5"); }
 
         let config = load_internal(
             "DEVNPC_TEST_NEW_API_KEY",
@@ -631,8 +566,6 @@ mod tests {
             "DEVNPC_TEST_NEW_CI_POLL_TIMEOUT",
             "DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_NEW_CI_MAX_RETRIES",
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -680,7 +613,7 @@ mod tests {
             "DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_NEW_CI_MAX_RETRIES",
         ] {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key); }
         }
     }
 }

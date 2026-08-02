@@ -129,11 +129,13 @@ mod tests {
     const PREFIX: &str = "DEVNPC_TEST_ENV_";
 
     fn set_var(key: &str, val: &str) {
-        std::env::set_var(key, val);
+        // Rust 2024 中 set_var 是 unsafe 的
+        unsafe { std::env::set_var(key, val); }
     }
 
     fn remove_var(key: &str) {
-        std::env::remove_var(key);
+        // Rust 2024 中 remove_var 是 unsafe 的
+        unsafe { std::env::remove_var(key); }
     }
 
     #[test]

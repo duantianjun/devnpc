@@ -60,10 +60,10 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
     /// 序列化 CWD 修改操作,避免并发测试互相干扰
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
+    static CWD_LOCK: Mutex<()> = Mutex::const_new(());
 
     /// 在临时目录中执行异步测试,自动恢复原 CWD
     async fn run_in_temp_dir<F, Fut>(f: F)
@@ -71,13 +71,10 @@ mod tests {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let (_dir, original_cwd) = {
-            let _lock = CWD_LOCK.lock().unwrap();
-            let dir = tempfile::tempdir().unwrap();
-            let original_cwd = std::env::current_dir().unwrap();
-            std::env::set_current_dir(dir.path()).unwrap();
-            (dir, original_cwd)
-        };
+        let _lock = CWD_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
         f().await;
         std::env::set_current_dir(original_cwd).unwrap();
     }
@@ -138,7 +135,7 @@ mod tests {
 
     #[test]
     fn get_report_dir_returns_correct_path() {
-        let _lock = CWD_LOCK.lock().unwrap();
+        let _lock = CWD_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let original_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
