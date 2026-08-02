@@ -1298,6 +1298,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
+ "tree-sitter-java",
  "tree-sitter-rust 0.23.3",
  "url",
  "uuid",

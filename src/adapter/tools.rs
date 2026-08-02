@@ -338,31 +338,73 @@ fn create_mr_note_tool(gitlab: Arc<dyn GitlabApi>, project_id: u64) -> FunctionT
 }
 
 // ============================================================
-// AFT 代码感知工具 (基于 tree-sitter)
+// AFT 代码感知工具 (基于 tree-sitter, 支持 Rust + Java)
 // ============================================================
 
-/// 解析 Rust 源码的 tree-sitter 辅助函数 (复制自 src/tools/aft.rs 以保持适配层独立)
-fn parse_source(source: &str) -> tree_sitter::Tree {
-    use std::sync::Mutex;
-    static ENGINE: Mutex<Option<tree_sitter::Parser>> = Mutex::new(None);
-    let mut guard = ENGINE.lock().unwrap();
-    let parser = guard.get_or_insert_with(|| {
-        let mut p = tree_sitter::Parser::new();
-        p.set_language(&tree_sitter_rust::LANGUAGE.into())
-            .expect("tree-sitter Rust 语言初始化失败");
-        p
-    });
-    parser
-        .parse(source, None)
-        .expect("tree-sitter 解析失败")
+/// 支持的语言
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Language {
+    Rust,
+    Java,
 }
 
-/// 关注的 AST 节点类型 (Rust 顶层声明)
-const INTERESTING_KINDS: &[&str] = &[
-    "function_item", "struct_item", "enum_item", "trait_item",
-    "impl_item", "mod_item", "const_item", "static_item",
-    "type_item", "macro_definition", "union_item", "foreign_mod_item",
-];
+/// 根据文件扩展名检测语言
+fn detect_language(path: &std::path::Path) -> Option<Language> {
+    match path.extension()?.to_str()? {
+        "rs" => Some(Language::Rust),
+        "java" => Some(Language::Java),
+        _ => None,
+    }
+}
+
+/// 获取 tree-sitter 语言的 Language 引用
+fn get_language(lang: Language) -> tree_sitter::Language {
+    match lang {
+        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Language::Java => tree_sitter_java::LANGUAGE.into(),
+    }
+}
+
+/// 返回对应语言的关注 AST 节点类型 (顶层声明)
+fn interesting_kinds(lang: Language) -> &'static [&'static str] {
+    match lang {
+        Language::Rust => &[
+            "function_item", "struct_item", "enum_item", "trait_item",
+            "impl_item", "mod_item", "const_item", "static_item",
+            "type_item", "macro_definition", "union_item", "foreign_mod_item",
+        ],
+        Language::Java => &[
+            "class_declaration", "interface_declaration", "enum_declaration",
+            "record_declaration", "method_declaration", "constructor_declaration",
+            "field_declaration", "annotation_type_declaration",
+        ],
+    }
+}
+
+/// 解析源码的 tree-sitter 辅助函数 (支持多语言,使用线程局部缓存)
+fn parse_source(source: &str, lang: Language) -> tree_sitter::Tree {
+    use std::cell::RefCell;
+    thread_local! {
+        static RUST_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+        static JAVA_PARSER: RefCell<Option<tree_sitter::Parser>> = const { RefCell::new(None) };
+    }
+    let parser_cell = match lang {
+        Language::Rust => &RUST_PARSER,
+        Language::Java => &JAVA_PARSER,
+    };
+    parser_cell.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let parser = guard.get_or_insert_with(|| {
+            let mut p = tree_sitter::Parser::new();
+            p.set_language(&get_language(lang))
+                .unwrap_or_else(|_| panic!("tree-sitter {:?} 语言初始化失败", lang));
+            p
+        });
+        parser
+            .parse(source, None)
+            .expect("tree-sitter 解析失败")
+    })
+}
 
 /// 从节点提取符号名
 fn node_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
@@ -372,13 +414,14 @@ fn node_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 /// 递归收集节点中所有感兴趣的符号
-fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize) -> Vec<SymbolInfo> {
+fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize, lang: Language) -> Vec<SymbolInfo> {
     if depth > 20 {
         return Vec::new();
     }
     let mut symbols = Vec::new();
+    let kinds = interesting_kinds(lang);
     let kind = node.kind();
-    if INTERESTING_KINDS.contains(&kind) && let Some(name) = node_name(node, source) {
+    if kinds.contains(&kind) && let Some(name) = node_name(node, source) {
         symbols.push(SymbolInfo {
             kind: kind.to_string(),
             name,
@@ -389,7 +432,7 @@ fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], depth: usize) -> 
         });
     }
     for child in node.children(&mut node.walk()) {
-        symbols.extend(collect_symbols(child, source, depth + 1));
+        symbols.extend(collect_symbols(child, source, depth + 1, lang));
     }
     symbols
 }
@@ -413,24 +456,26 @@ fn find_symbol_node<'a>(
     source: &'a [u8],
     name: &str,
     depth: usize,
+    lang: Language,
 ) -> Option<tree_sitter::Node<'a>> {
     if depth > 20 {
         return None;
     }
+    let kinds = interesting_kinds(lang);
     let kind = node.kind();
-    if INTERESTING_KINDS.contains(&kind) && let Some(n) = node_name(node, source) && n == name {
+    if kinds.contains(&kind) && let Some(n) = node_name(node, source) && n == name {
         return Some(node);
     }
     for child in node.children(&mut node.walk()) {
-        if let Some(found) = find_symbol_node(child, source, name, depth + 1) {
+        if let Some(found) = find_symbol_node(child, source, name, depth + 1, lang) {
             return Some(found);
         }
     }
     None
 }
 
-/// 递归收集 .rs 文件
-fn collect_rs_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize) {
+/// 递归收集源码文件 (.rs / .java)
+fn collect_source_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize) {
     if depth > 10 {
         return;
     }
@@ -444,39 +489,55 @@ fn collect_rs_files(dir: &PathBuf, results: &mut Vec<PathBuf>, depth: usize) {
             if name == "target" || name == ".git" || name == "node_modules" {
                 continue;
             }
-            collect_rs_files(&path, results, depth + 1);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            results.push(path);
-        }
+            collect_source_files(&path, results, depth + 1);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && (ext == "rs" || ext == "java") {
+                results.push(path);
+            }
     }
 }
 
-/// aft_outline: 列出 Rust 文件的所有顶层符号
+/// 从文件路径检测语言并解析,返回 (tree, lang)
+fn parse_file(file_io: &FileIo, path: &str) -> Result<(tree_sitter::Tree, Language), adk_rust::AdkError> {
+    let full = file_io.validate_path(path).map_err(|e| {
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
+    })?;
+    let lang = detect_language(&full).ok_or_else(|| {
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs 和 .java: {path}"))
+    })?;
+    let source = std::fs::read_to_string(&full).map_err(|e| {
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
+    })?;
+    let tree = parse_source(&source, lang);
+    Ok((tree, lang))
+}
+
+/// aft_outline: 列出文件的所有顶层符号 (Rust + Java)
 fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_outline",
-        "列出 Rust 文件的所有顶层符号 (函数/结构体/枚举/Trait 等),返回符号名+行号范围。",
+        "列出源码文件的所有顶层符号 (Rust: 函数/结构体/枚举/Trait; Java: 类/接口/方法/字段),返回符号名+行号范围。支持 .rs 和 .java 文件。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
                 let path = args["path"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 path 参数")
                 })?;
+                let (tree, lang) = parse_file(&file_io, path)?;
                 let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("路径验证失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
                 })?;
                 let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("读取文件失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
                 })?;
-                let tree = parse_source(&source);
-                let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0);
+                let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, lang);
                 if symbols.is_empty() {
                     return Ok(serde_json::json!({ "output": "(无顶层符号)" }));
                 }
                 let lines: Vec<String> = symbols
                     .iter()
                     .map(|s| {
-                        let kind_short = s.kind.trim_end_matches("_item").trim_end_matches("_invocation");
+                        let kind_short = s.kind.trim_end_matches("_item").trim_end_matches("_declaration");
                         format!("{kind_short} {} (line {}-{})", s.name, s.start_line, s.end_line)
                     })
                     .collect();
@@ -490,7 +551,7 @@ fn create_aft_outline_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_view_symbol",
-        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。",
+        "查看文件中指定符号的完整定义源码。参数: path (文件路径), symbol (符号名)。支持 .rs 和 .java。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -500,14 +561,14 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
                 let symbol = args["symbol"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 symbol 参数")
                 })?;
+                let (tree, lang) = parse_file(&file_io, path)?;
                 let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("路径验证失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
                 })?;
                 let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("读取文件失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
                 })?;
-                let tree = parse_source(&source);
-                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0)
+                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, lang)
                     .ok_or_else(|| {
                         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
                     })?;
@@ -524,7 +585,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_edit_symbol",
-        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。",
+        "替换文件中指定符号的完整定义。参数: path (文件路径), symbol (符号名), content (新源码)。支持 .rs 和 .java。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -537,14 +598,14 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
                 let new_content = args["content"].as_str().ok_or_else(|| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT","缺少 content 参数")
                 })?;
+                let (tree, lang) = parse_file(&file_io, path)?;
                 let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("路径验证失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
                 })?;
                 let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("读取文件失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
                 })?;
-                let tree = parse_source(&source);
-                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0)
+                let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, lang)
                     .ok_or_else(|| {
                         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
                     })?;
@@ -556,7 +617,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
                 new_source.push_str(&source[end..]);
 
                 // 验证新源码能通过 tree-sitter 解析
-                let new_tree = parse_source(&new_source);
+                let new_tree = parse_source(&new_source, lang);
                 if new_tree.root_node().has_error() {
                     return Ok(serde_json::json!({
                         "error": "替换后的源码语法错误,操作已取消",
@@ -577,7 +638,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_search_symbols",
-        "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。",
+        "在 workspace 中搜索符号名匹配正则的符号。参数: pattern (正则), dir (可选,相对目录,默认根)。搜索 .rs 和 .java 文件。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -598,10 +659,11 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
                 };
 
                 let mut results = Vec::new();
-                collect_rs_files(&search_dir, &mut results, 0);
+                collect_source_files(&search_dir, &mut results, 0);
 
                 let mut matches = Vec::new();
                 for file_path in &results {
+                    let Some(lang) = detect_language(file_path) else { continue };
                     let rel = file_path
                         .strip_prefix(&file_io.workspace)
                         .unwrap_or(file_path)
@@ -611,14 +673,14 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
-                    let tree = parse_source(&source);
-                    let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0);
+                    let tree = parse_source(&source, lang);
+                    let symbols = collect_symbols(tree.root_node(), source.as_bytes(), 0, lang);
                     for sym in &symbols {
                         if regex.is_match(&sym.name) {
                             matches.push(format!(
                                 "{}: {} {} (line {})",
                                 rel,
-                                sym.kind.trim_end_matches("_item"),
+                                sym.kind.trim_end_matches("_item").trim_end_matches("_declaration"),
                                 sym.name,
                                 sym.start_line
                             ));
@@ -639,7 +701,7 @@ fn create_aft_search_symbols_tool(file_io: FileIo) -> FunctionTool {
 fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
         "aft_ast_replace",
-        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。",
+        "在文件中用正则查找并替换,替换后验证语法。参数: path, pattern (正则), replacement, flags (可选,如 \"i\")。支持 .rs 和 .java。",
         move |_ctx: Arc<dyn adk_rust::tool::ToolContext>, args: Value| {
             let file_io = file_io.clone();
             Box::pin(async move {
@@ -661,11 +723,12 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT",format!("无效正则: {e}"))
                 })?;
 
+                let (_tree, lang) = parse_file(&file_io, path)?;
                 let full = file_io.validate_path(path).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("路径验证失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
                 })?;
                 let source = std::fs::read_to_string(&full).map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("读取文件失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
                 })?;
 
                 let new_source = regex.replace_all(&source, replacement).to_string();
@@ -674,7 +737,7 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
                 }
 
                 // 验证语法
-                let new_tree = parse_source(&new_source);
+                let new_tree = parse_source(&new_source, lang);
                 if new_tree.root_node().has_error() {
                     return Ok(serde_json::json!({
                         "error": "替换后源码语法错误,操作已取消",
