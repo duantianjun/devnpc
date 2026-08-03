@@ -260,3 +260,44 @@ fn local_logger_file_importable_by_dashboard() {
     assert_eq!(result.events_count, 2, "应导入 2 条 execution 事件");
     assert!(!result.skipped, "首次导入不应跳过");
 }
+
+// ============================================================
+// 降级测试
+// ============================================================
+
+/// dashboard 持续返回 500 (不可达/故障) 时,EventSender 不应 panic,
+/// finish 应在重试后返回,不永久阻塞主流程
+#[tokio::test]
+async fn event_sender_degrades_when_dashboard_unreachable() {
+    // wiremock 对所有 POST 返回 500,模拟 dashboard 持续故障
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .mount(&mock)
+        .await;
+
+    let config = DashboardConfig {
+        enabled: true,
+        url: mock.uri(),
+        token: "test-token".into(),
+        batch_size: 20,
+        batch_interval_secs: 3,
+        local_event_log: false,
+    };
+
+    // 创建 sender 不应 panic (实际 API: new 仅启动后台 batch loop,不发 start)
+    let sender = EventSender::new(&config, "deg-1");
+
+    // 不推送任何事件 → finish 时无需 flush batch,仅 POST finish (重试 6 次后返回)
+    // 实际 post_with_retry: 1+2+4+8+16=31s,留足余量用 60s 超时
+    let finished = make_finished("deg-1", TaskStatus::Failed);
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        sender.finish(&config, finished),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "finish 应在重试后返回,不应永久阻塞"
+    );
+}
