@@ -298,3 +298,81 @@ async fn full_task_lifecycle_returns_complete_data() {
         "trends 应为 JSON 数组或对象"
     );
 }
+
+use futures::StreamExt;
+
+/// SSE 实时推送: 订阅 → 推送事件 → 校验 stream 收到事件
+#[tokio::test]
+async fn sse_stream_receives_pushed_events() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let token = server.token.as_str();
+    let task_id = format!("e2e-sse-{}", uuid::Uuid::new_v4());
+
+    // 1. 先启动任务 (使后续 batch 事件进入 RealtimeHub)
+    let started = make_started(&task_id);
+    let resp = client
+        .post(format!("{}/api/events/start", server.base_url))
+        .header("X-Devnpc-Token", token)
+        .json(&started)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "start 应成功");
+
+    // 2. 订阅 SSE 流 (连接建立即代表服务端已注册订阅者)
+    let sse_resp = client
+        .get(format!("{}/api/realtime/stream", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(sse_resp.status().is_success(), "SSE 端点应返回 2xx");
+    let content_type = sse_resp
+        .headers()
+        .get("content-type")
+        .expect("缺少 content-type")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "content-type 应为 text/event-stream, 实际: {content_type}"
+    );
+
+    // 等待一小段时间确保服务端订阅注册完成后再推送
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // 3. 推送一批执行事件 (应被 RealtimeHub 广播到 SSE 订阅者)
+    let batch = make_batch(
+        &task_id,
+        vec![make_llm_call(1), make_tool_call("read_file")],
+    );
+    let resp = client
+        .post(format!("{}/api/events/batch", server.base_url))
+        .header("X-Devnpc-Token", token)
+        .json(&batch)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "batch 应成功");
+
+    // 4. 从 SSE 流读取,校验收到 data: 行 (3s 内)
+    let mut stream = sse_resp.bytes_stream();
+    let mut received = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                received.push_str(&String::from_utf8_lossy(&chunk));
+                if received.contains("data:") {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        received.contains("data:"),
+        "SSE 流应在 3s 内收到 data: 行, 实际收到: {received}"
+    );
+}
