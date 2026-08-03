@@ -3,3 +3,4 @@
 pub mod collector;
 pub mod html;
 pub mod publisher;
+pub mod sender;
