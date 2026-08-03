@@ -1,0 +1,95 @@
+{% extends "layout.html" %}
+
+{% block title %}SOP 偏离监控 - devnpc Dashboard{% endblock %}
+{% block page_title %}SOP 偏离监控{% endblock %}
+
+{% block content %}
+<!-- ECharts 柱状图:按步骤统计偏离频率 -->
+<div class="layui-row layui-col-space15">
+    <div class="layui-col-md12">
+        <div class="layui-card">
+            <div class="layui-card-header">按步骤统计偏离频率</div>
+            <div class="layui-card-body">
+                <div id="chart-sop" style="height:300px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 偏离事件列表 -->
+<div class="layui-row layui-col-space15">
+    <div class="layui-col-md12">
+        <div class="layui-card">
+            <div class="layui-card-header">偏离事件列表</div>
+            <div class="layui-card-body">
+                <table id="deviation-table" lay-filter="deviation"></table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/echarts.min.js"></script>
+<script>
+layui.use(['table'], function(){
+    var table = layui.table;
+    var chart = echarts.init(document.getElementById('chart-sop'));
+
+    // 加载 SOP 偏离统计 (spec §5.2: GET /api/stats/sop)
+    // 响应: SopDeviationRow 数组 [{ id, task_id, step, note, created_at }]
+    fetch('/api/stats/sop')
+        .then(function(r){
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(data){
+            var deviations = data || [];
+            // 按步骤聚合偏离频率
+            var freq = {};
+            deviations.forEach(function(d){
+                var s = d.step || '(未知)';
+                freq[s] = (freq[s] || 0) + 1;
+            });
+            var steps = Object.keys(freq);
+            chart.setOption({
+                tooltip: {trigger: 'axis'},
+                xAxis: {
+                    type: 'category',
+                    data: steps
+                },
+                yAxis: {type: 'value'},
+                series: [{
+                    name: '偏离次数',
+                    type: 'bar',
+                    data: steps.map(function(s){ return freq[s]; }),
+                    itemStyle: {color: '#FF5722'}
+                }]
+            });
+
+            // 偏离事件列表表格
+            table.render({
+                elem: '#deviation-table',
+                data: deviations,
+                page: true,
+                limit: 20,
+                cols: [[
+                    {field: 'created_at', title: '时间', width: 200},
+                    {field: 'task_id', title: '任务', width: 140, templet: function(d){
+                        return '<a href="/tasks/' + d.task_id + '">' + d.task_id.substring(0, 8) + '</a>';
+                    }},
+                    {field: 'step', title: '步骤', width: 200},
+                    {field: 'note', title: '说明'}
+                ]]
+            });
+        })
+        .catch(function(err){
+            layui.layer.msg('加载 SOP 偏离数据失败: ' + err.message, {icon: 2});
+        });
+
+    window.addEventListener('resize', function(){
+        chart.resize();
+    });
+});
+</script>
+{% endblock %}

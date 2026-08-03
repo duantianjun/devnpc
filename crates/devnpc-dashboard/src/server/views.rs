@@ -52,3 +52,10 @@ pub struct CostTemplate {
 pub struct CiTemplate {
     pub active_nav: String,
 }
+
+/// SOP 偏离监控页
+#[derive(Template)]
+#[template(path = "sop.html")]
+pub struct SopTemplate {
+    pub active_nav: String,
+}
