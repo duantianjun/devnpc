@@ -1,0 +1,60 @@
+[package]
+name = "devnpc-dashboard"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "devnpc 可观测 Dashboard 服务端: 实时监控 + 历史分析"
+
+[[bin]]
+name = "devnpc-dashboard"
+path = "src/main.rs"
+
+[lib]
+name = "devnpc_dashboard"
+path = "src/lib.rs"
+
+[dependencies]
+devnpc-core = { path = "../devnpc-core" }
+
+# 异步运行时
+tokio = { workspace = true }
+futures = { workspace = true }
+tokio-stream = "0.1"
+
+# Web 框架 (multipart 用于文件导入)
+axum = { workspace = true, features = ["multipart"] }
+tower = { workspace = true }
+
+# 数据库
+rusqlite = { workspace = true }
+
+# 序列化
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# 日志与错误
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+# 工具
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# 配置加载
+dotenvy = "0.15"
+
+# 模板 (Phase 4 使用,此处仅为错误类型前置)
+askama = "0.12"
+
+# 静态资源嵌入
+rust-embed = "8"
+mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }

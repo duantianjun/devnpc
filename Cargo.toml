@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/devnpc-core", "crates/devnpc"]
+members = ["crates/devnpc-core", "crates/devnpc", "crates/devnpc-dashboard"]
 resolver = "2"
 
 [workspace.package]
