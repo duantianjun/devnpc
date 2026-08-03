@@ -69,6 +69,54 @@ pub struct TaskListResponse {
     pub size: usize,
 }
 
+/// 趋势统计单点
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrendPoint {
+    pub date: String,
+    pub total: u64,
+    pub success: u64,
+    pub failed: u64,
+    pub avg_duration_secs: f64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+}
+
+/// 趋势统计结果
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrendsData {
+    pub days: u32,
+    pub points: Vec<TrendPoint>,
+}
+
+/// 成本聚合桶
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CostBucket {
+    pub key: String,
+    pub total_cost_usd: f64,
+    pub total_tokens: u64,
+    pub task_count: u64,
+}
+
+/// CI 自愈统计
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CiStats {
+    pub total_failed: u64,
+    pub auto_healed: u64,
+    pub heal_rate: f64,
+    pub avg_retries: f64,
+    pub failed_tasks: Vec<TaskRow>,
+}
+
+/// SOP 偏离记录行
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SopDeviationRow {
+    pub id: i64,
+    pub task_id: String,
+    pub step: String,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
 // ============================================================
 // Storage
 // ============================================================
@@ -404,6 +452,166 @@ impl Storage {
         })
     }
 
+    /// 趋势统计 (按天聚合最近 N 天)
+    pub fn trends(&self, days: u32) -> Result<TrendsData> {
+        let conn = self.conn.lock().unwrap();
+        let modifier = format!("-{} days", days);
+        let mut stmt = conn.prepare(
+            "SELECT date(started_at) as d, COUNT(*), \
+             SUM(CASE WHEN status='success' THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN status IN ('failed','ci_failed','timeout') THEN 1 ELSE 0 END), \
+             AVG(duration_secs), \
+             SUM(total_tokens), \
+             SUM(estimated_cost_usd) \
+             FROM tasks WHERE started_at >= datetime('now', ?1) \
+             GROUP BY d ORDER BY d ASC",
+        )?;
+        let points: Vec<TrendPoint> = stmt
+            .query_map(rusqlite::params![modifier], |r| {
+                Ok(TrendPoint {
+                    date: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    total: r.get::<_, i64>(1)? as u64,
+                    success: r.get::<_, i64>(2)? as u64,
+                    failed: r.get::<_, i64>(3)? as u64,
+                    avg_duration_secs: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    total_tokens: r.get::<_, i64>(5)? as u64,
+                    total_cost_usd: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(TrendsData { days, points })
+    }
+
+    /// 成本聚合 (group_by: project/model/kind)
+    pub fn cost_breakdown(&self, group_by: &str) -> Result<Vec<CostBucket>> {
+        let column = match group_by {
+            "project" => "project",
+            "model" => "model",
+            "kind" => "task_kind",
+            _ => {
+                return Err(crate::error::DashboardError::ImportFormat(format!(
+                    "无效的 group_by: {} (允许 project/model/kind)",
+                    group_by
+                )))
+            }
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} as k, SUM(estimated_cost_usd), SUM(total_tokens), COUNT(*) \
+             FROM tasks WHERE status != 'running' GROUP BY k ORDER BY SUM(estimated_cost_usd) DESC",
+            column
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let buckets: Vec<CostBucket> = stmt
+            .query_map([], |r| {
+                Ok(CostBucket {
+                    key: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    total_cost_usd: r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                    total_tokens: r.get::<_, i64>(2)? as u64,
+                    task_count: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(buckets)
+    }
+
+    /// CI 自愈统计
+    pub fn ci_stats(&self) -> Result<CiStats> {
+        let conn = self.conn.lock().unwrap();
+        let total_failed: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status IN ('failed','ci_failed','timeout')",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? as u64),
+            )
+            .unwrap_or(0);
+        let auto_healed: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE ci_retries > 0 AND status = 'success'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? as u64),
+            )
+            .unwrap_or(0);
+        let avg_retries: f64 = conn
+            .query_row(
+                "SELECT AVG(ci_retries) FROM tasks WHERE ci_retries > 0",
+                [],
+                |r| Ok(r.get::<_, Option<f64>>(0)?.unwrap_or(0.0)),
+            )
+            .unwrap_or(0.0);
+        let heal_rate = if total_failed + auto_healed == 0 {
+            0.0
+        } else {
+            auto_healed as f64 / (total_failed + auto_healed) as f64
+        };
+        // 失败任务列表
+        let mut stmt = conn.prepare(
+            "SELECT task_id, project, mr_iid, pipeline_id, task_description, task_kind, \
+             model, status, started_at, finished_at, duration_secs, total_tokens, \
+             input_tokens, output_tokens, estimated_cost_usd, mr_url, ci_url, summary, \
+             error, ci_retries FROM tasks WHERE status IN ('failed','ci_failed','timeout') \
+             ORDER BY started_at DESC LIMIT 100",
+        )?;
+        let failed_tasks: Vec<TaskRow> = stmt
+            .query_map([], |r| {
+                Ok(TaskRow {
+                    task_id: r.get(0)?,
+                    project: r.get(1)?,
+                    mr_iid: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    pipeline_id: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    task_description: r.get(4)?,
+                    task_kind: r.get(5)?,
+                    model: r.get(6)?,
+                    status: r.get(7)?,
+                    started_at: r.get(8)?,
+                    finished_at: r.get(9)?,
+                    duration_secs: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+                    total_tokens: r.get::<_, i64>(11)? as u64,
+                    input_tokens: r.get::<_, i64>(12)? as u64,
+                    output_tokens: r.get::<_, i64>(13)? as u64,
+                    estimated_cost_usd: r.get(14)?,
+                    mr_url: r.get(15)?,
+                    ci_url: r.get(16)?,
+                    summary: r.get(17)?,
+                    error: r.get(18)?,
+                    ci_retries: r.get::<_, i64>(19)? as u64,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(CiStats {
+            total_failed,
+            auto_healed,
+            heal_rate,
+            avg_retries,
+            failed_tasks,
+        })
+    }
+
+    /// SOP 偏离记录 (最近 100 条)
+    pub fn sop_stats(&self) -> Result<Vec<SopDeviationRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, step, note, created_at \
+             FROM sop_deviations ORDER BY created_at DESC LIMIT 100",
+        )?;
+        let rows: Vec<SopDeviationRow> = stmt
+            .query_map([], |r| {
+                Ok(SopDeviationRow {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    step: r.get(2)?,
+                    note: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     // ---- 内部辅助 (已持有锁) ----
 
     fn task_exists_locked(&self, conn: &Connection, task_id: &str) -> Result<bool> {
@@ -432,7 +640,7 @@ impl Storage {
 mod tests {
     use super::*;
     use devnpc_core::report::event_schema::{
-        CiStatus, ExecutionEvent, TaskFinishedEvent, TaskStartedEvent, TaskStatus,
+        CiStatus, ExecutionEvent, SopStepStatus, TaskFinishedEvent, TaskStartedEvent, TaskStatus,
     };
 
     fn sample_started(task_id: &str) -> TaskStartedEvent {
@@ -749,5 +957,196 @@ mod tests {
             .unwrap();
         assert_eq!(resp.tasks.len(), 1);
         assert_eq!(resp.tasks[0].task_id, "t1");
+    }
+
+    #[test]
+    fn finish_task_writes_sop_deviations() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.insert_events(
+            "t1",
+            &vec![
+                ExecutionEvent::SopStep {
+                    step: "analyze".into(),
+                    status: SopStepStatus::Completed,
+                    note: None,
+                },
+                ExecutionEvent::SopStep {
+                    step: "implement".into(),
+                    status: SopStepStatus::Deviated,
+                    note: Some("跳过单测".into()),
+                },
+            ],
+        )
+        .unwrap();
+        let finished = TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:03:00Z".into(),
+        };
+        s.finish_task(&finished).unwrap();
+        let devs = s.sop_stats().unwrap();
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].step, "implement");
+    }
+
+    #[test]
+    fn trends_returns_points() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        let f = TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 30,
+            total_tokens: 1000,
+            estimated_cost_usd: 0.05,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:05:00Z".into(),
+        };
+        s.finish_task(&f).unwrap();
+        let data = s.trends(7).unwrap();
+        assert_eq!(data.days, 7);
+        assert!(!data.points.is_empty());
+        let total: u64 = data.points.iter().map(|p| p.total).sum();
+        assert_eq!(total, 1);
+        let success: u64 = data.points.iter().map(|p| p.success).sum();
+        assert_eq!(success, 1);
+    }
+
+    #[test]
+    fn cost_breakdown_by_project() {
+        let s = Storage::open_in_memory().unwrap();
+        let mut a = sample_started("t1");
+        a.project = "proj-a".into();
+        let mut b = sample_started("t2");
+        b.project = "proj-b".into();
+        s.start_task(&a).unwrap();
+        s.start_task(&b).unwrap();
+        s.finish_task(&TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 500,
+            estimated_cost_usd: 0.02,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:05:00Z".into(),
+        })
+        .unwrap();
+        s.finish_task(&TaskFinishedEvent {
+            task_id: "t2".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 300,
+            estimated_cost_usd: 0.03,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:06:00Z".into(),
+        })
+        .unwrap();
+        let buckets = s.cost_breakdown("project").unwrap();
+        assert_eq!(buckets.len(), 2);
+        let total_cost: f64 = buckets.iter().map(|b| b.total_cost_usd).sum();
+        assert!((total_cost - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_breakdown_invalid_group_returns_error() {
+        let s = Storage::open_in_memory().unwrap();
+        assert!(s.cost_breakdown("invalid").is_err());
+    }
+
+    #[test]
+    fn ci_stats_counts_failures_and_heals() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.insert_events(
+            "t1",
+            &vec![ExecutionEvent::CiStatus {
+                pipeline_id: 100,
+                status: CiStatus::Failed,
+                attempt: 2,
+            }],
+        )
+        .unwrap();
+        s.finish_task(&TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:05:00Z".into(),
+        })
+        .unwrap();
+        s.start_task(&sample_started("t2")).unwrap();
+        s.finish_task(&TaskFinishedEvent {
+            task_id: "t2".into(),
+            status: TaskStatus::CiFailed,
+            duration_secs: 10,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "fail".into(),
+            error: Some("CI 失败".into()),
+            finished_at: "2026-08-03T10:06:00Z".into(),
+        })
+        .unwrap();
+        let stats = s.ci_stats().unwrap();
+        // t1: ci_retries=2 + status=success -> auto_healed
+        // t2: status=ci_failed -> total_failed
+        assert_eq!(stats.total_failed, 1);
+        assert_eq!(stats.auto_healed, 1);
+        assert_eq!(stats.failed_tasks.len(), 1);
+    }
+
+    #[test]
+    fn sop_stats_returns_deviations() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.insert_events(
+            "t1",
+            &vec![ExecutionEvent::SopStep {
+                step: "test".into(),
+                status: SopStepStatus::Deviated,
+                note: Some("跳过测试".into()),
+            }],
+        )
+        .unwrap();
+        s.finish_task(&TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:05:00Z".into(),
+        })
+        .unwrap();
+        let devs = s.sop_stats().unwrap();
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].step, "test");
+        assert_eq!(devs[0].note.as_deref(), Some("跳过测试"));
     }
 }
