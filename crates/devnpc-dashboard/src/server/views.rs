@@ -38,3 +38,10 @@ pub struct RealtimeTemplate {
 pub struct TrendsTemplate {
     pub active_nav: String,
 }
+
+/// 成本分析页
+#[derive(Template)]
+#[template(path = "cost.html")]
+pub struct CostTemplate {
+    pub active_nav: String,
+}

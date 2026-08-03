@@ -1,0 +1,105 @@
+{% extends "layout.html" %}
+
+{% block title %}成本分析 - devnpc Dashboard{% endblock %}
+{% block page_title %}成本分析{% endblock %}
+
+{% block content %}
+<!-- 分组维度切换:项目/模型/任务类型 (spec §6.3.5) -->
+<div class="layui-btn-container" style="margin-bottom:15px;">
+    <button class="layui-btn layui-btn-sm" data-group="project">按项目</button>
+    <button class="layui-btn layui-btn-sm layui-btn-primary" data-group="model">按模型</button>
+    <button class="layui-btn layui-btn-sm layui-btn-primary" data-group="kind">按任务类型</button>
+</div>
+
+<div class="layui-row layui-col-space15">
+    <!-- 饼图:成本占比 -->
+    <div class="layui-col-md6">
+        <div class="layui-card">
+            <div class="layui-card-header">成本占比</div>
+            <div class="layui-card-body">
+                <div id="chart-pie" style="height:400px;"></div>
+            </div>
+        </div>
+    </div>
+    <!-- 明细表格 -->
+    <div class="layui-col-md6">
+        <div class="layui-card">
+            <div class="layui-card-header">明细</div>
+            <div class="layui-card-body">
+                <table id="cost-table" lay-filter="cost"></table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/echarts.min.js"></script>
+<script>
+layui.use(['table'], function(){
+    var table = layui.table;
+    var pieChart = echarts.init(document.getElementById('chart-pie'));
+
+    // 加载成本数据 (spec §5.2: GET /api/stats/cost?group_by=xxx)
+    // 响应字段: { key, total_cost_usd, total_tokens, task_count }
+    function loadCost(groupBy) {
+        fetch('/api/stats/cost?group_by=' + groupBy)
+            .then(function(r){
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function(data){
+                // 饼图数据
+                var pieData = (data || []).map(function(b){
+                    return {name: b.key, value: b.total_cost_usd};
+                });
+                pieChart.setOption({
+                    title: {text: '成本占比', left: 'center'},
+                    tooltip: {trigger: 'item', formatter: '{b}: ${c} ({d}%)'},
+                    series: [{
+                        type: 'pie',
+                        radius: '60%',
+                        data: pieData,
+                        emphasis: {itemStyle: {shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.5)'}}
+                    }]
+                });
+                // 明细表格 (静态数据填充 layui-table)
+                table.render({
+                    elem: '#cost-table',
+                    data: data || [],
+                    cols: [[
+                        {field: 'key', title: '名称'},
+                        {field: 'task_count', title: '任务数', width: 100},
+                        {field: 'total_tokens', title: 'Token', width: 120},
+                        {field: 'total_cost_usd', title: '成本($)', width: 120, templet: function(d){
+                            return Number(d.total_cost_usd || 0).toFixed(4);
+                        }}
+                    ]]
+                });
+            })
+            .catch(function(err){
+                layui.layer.msg('加载成本数据失败: ' + err.message, {icon: 2});
+            });
+    }
+
+    // 默认按项目分组
+    loadCost('project');
+
+    // 分组维度切换
+    document.querySelectorAll('[data-group]').forEach(function(btn){
+        btn.addEventListener('click', function(){
+            document.querySelectorAll('[data-group]').forEach(function(b){
+                b.classList.add('layui-btn-primary');
+            });
+            this.classList.remove('layui-btn-primary');
+            loadCost(this.dataset.group);
+        });
+    });
+
+    // 窗口尺寸变化时重绘
+    window.addEventListener('resize', function(){
+        pieChart.resize();
+    });
+});
+</script>
+{% endblock %}
