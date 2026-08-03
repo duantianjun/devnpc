@@ -171,3 +171,130 @@ async fn dashboard_starts_and_serves_index() {
         resp.status()
     );
 }
+
+use common::{make_batch, make_finished, make_llm_call, make_started, make_tool_call};
+use devnpc_core::report::event_schema::TaskStatus;
+
+/// 端到端全流程: start → batch(×3) → finish → 校验任务详情/任务列表/趋势聚合
+#[tokio::test]
+async fn full_task_lifecycle_returns_complete_data() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let token = server.token.as_str();
+    let task_id = format!("e2e-full-{}", uuid::Uuid::new_v4());
+
+    // 1. POST /api/events/start (带鉴权 header)
+    let started = make_started(&task_id);
+    let resp = client
+        .post(format!("{}/api/events/start", server.base_url))
+        .header("X-Devnpc-Token", token)
+        .json(&started)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "start 应返回 2xx, 实际: {}",
+        resp.status()
+    );
+
+    // 2. POST /api/events/batch 多次 (每次 2 条事件)
+    for i in 1..=3u32 {
+        let batch = make_batch(
+            &task_id,
+            vec![make_llm_call(i), make_tool_call("read_file")],
+        );
+        let resp = client
+            .post(format!("{}/api/events/batch", server.base_url))
+            .header("X-Devnpc-Token", token)
+            .json(&batch)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "batch #{} 应返回 2xx, 实际: {}",
+            i,
+            resp.status()
+        );
+    }
+
+    // 3. POST /api/events/finish
+    let finished = make_finished(&task_id, TaskStatus::Success);
+    let resp = client
+        .post(format!("{}/api/events/finish", server.base_url))
+        .header("X-Devnpc-Token", token)
+        .json(&finished)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "finish 应返回 2xx, 实际: {}",
+        resp.status()
+    );
+
+    // 4. 校验 GET /api/tasks/:id 返回完整数据
+    let resp = client
+        .get(format!("{}/api/tasks/{}", server.base_url, task_id))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "GET /api/tasks/:id 应返回 2xx, 实际: {}",
+        resp.status()
+    );
+    let task: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(task["task_id"], task_id, "task_id 应匹配");
+    assert_eq!(task["status"], "success", "状态应为 success");
+    assert_eq!(task["project"], "test-group/test-project");
+    assert_eq!(task["duration_secs"], 90, "duration_secs 应为 90");
+    assert_eq!(task["total_tokens"], 600, "total_tokens 应为 600");
+    assert_eq!(
+        task["mr_iid"].as_u64(),
+        Some(42),
+        "mr_iid 应为 42, 实际: {:?}",
+        task["mr_iid"]
+    );
+
+    // 5. 校验 GET /api/tasks (任务列表 JSON) 包含该任务
+    //    (GET / 页面通过 AJAX 异步加载 /api/tasks,HTML 本身不含 task_id)
+    let resp = client
+        .get(format!("{}/api/tasks", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "GET /api/tasks 应返回 2xx");
+    let list: serde_json::Value = resp.json().await.unwrap();
+    let tasks = list["tasks"]
+        .as_array()
+        .expect("任务列表响应应含 tasks 数组");
+    let found = tasks
+        .iter()
+        .any(|t| t["task_id"].as_str() == Some(task_id.as_str()));
+    assert!(found, "任务列表应包含刚创建的 task_id");
+
+    // 6. 校验 GET /api/stats/trends?days=7 返回聚合数据 (非空 JSON)
+    let resp = client
+        .get(format!("{}/api/stats/trends?days=7", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "GET /api/stats/trends 应返回 2xx, 实际: {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.len() > 2,
+        "trends 响应不应为空, 实际: {body}"
+    );
+    // 应可解析为合法 JSON
+    let trends: serde_json::Value = serde_json::from_str(&body).expect("trends 应为合法 JSON");
+    assert!(
+        trends.is_array() || trends.is_object(),
+        "trends 应为 JSON 数组或对象"
+    );
+}
