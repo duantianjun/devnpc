@@ -73,7 +73,7 @@ impl RealtimeHub {
     }
 
     /// 订阅事件流: 先回放缓冲历史,再接收实时事件
-    pub async fn subscribe(&self) -> impl Stream<Item = RealtimeEvent> {
+    pub async fn subscribe(&self) -> impl Stream<Item = RealtimeEvent> + use<> {
         // 克隆历史快照
         let history: Vec<RealtimeEvent> = {
             let buf = self.buffer.read().await;

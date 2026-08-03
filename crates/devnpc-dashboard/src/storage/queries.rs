@@ -812,7 +812,7 @@ mod tests {
         s.start_task(&sample_started("t1")).unwrap();
         s.insert_events(
             "t1",
-            &vec![
+            &[
                 ExecutionEvent::LlmCall {
                     iteration: 1,
                     prompt_tokens: 500,
@@ -857,7 +857,7 @@ mod tests {
         s.start_task(&sample_started("t1")).unwrap();
         s.insert_events(
             "t1",
-            &vec![
+            &[
                 ExecutionEvent::CiStatus {
                     pipeline_id: 100,
                     status: CiStatus::Failed,
@@ -962,7 +962,7 @@ mod tests {
         s.start_task(&sample_started("t1")).unwrap();
         s.insert_events(
             "t1",
-            &vec![ExecutionEvent::LlmCall {
+            &[ExecutionEvent::LlmCall {
                 iteration: 1,
                 prompt_tokens: 10,
                 completion_tokens: 5,
@@ -1038,7 +1038,7 @@ mod tests {
         s.start_task(&sample_started("t1")).unwrap();
         s.insert_events(
             "t1",
-            &vec![
+            &[
                 ExecutionEvent::SopStep {
                     step: "analyze".into(),
                     status: SopStepStatus::Completed,
@@ -1149,7 +1149,7 @@ mod tests {
         s.start_task(&sample_started("t1")).unwrap();
         s.insert_events(
             "t1",
-            &vec![ExecutionEvent::CiStatus {
+            &[ExecutionEvent::CiStatus {
                 pipeline_id: 100,
                 status: CiStatus::Failed,
                 attempt: 2,
@@ -1197,7 +1197,7 @@ mod tests {
         s.start_task(&sample_started("t1")).unwrap();
         s.insert_events(
             "t1",
-            &vec![ExecutionEvent::SopStep {
+            &[ExecutionEvent::SopStep {
                 step: "test".into(),
                 status: SopStepStatus::Deviated,
                 note: Some("跳过测试".into()),

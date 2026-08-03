@@ -20,6 +20,8 @@ use devnpc::gitlab_api::GitlabApi;
 use devnpc::memory::context::Context;
 use devnpc::report::collector::{CostEstimate, ReportData, Trajectory, TrajectoryEvent, TrajectorySummary};
 use devnpc::report::publisher;
+use devnpc::report::sender::{EventSender, LocalEventLogger};
+use devnpc_core::report::event_schema::{TaskFinishedEvent, TaskStartedEvent, TaskStatus};
 use devnpc::trigger::parser::{classify_task, parse_mention_with_pattern, Trigger};
 
 /// devnpc - 基于 GitLab 的企业级研发流程 AI 智能体
@@ -227,6 +229,50 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     };
 
     let issue_iid = issue_iid.or(task_spec.target_issue);
+
+    // 生成 task_id 并初始化 dashboard 推送/本地日志 (spec §4.4)
+    let task_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(task_id = %task_id, "任务 task_id 已生成");
+
+    let started_event = TaskStartedEvent {
+        task_id: task_id.clone(),
+        project: format!("{}", config.gitlab.project_id),
+        mr_iid,
+        pipeline_id: None,
+        task_description: task_spec.description.clone(),
+        task_kind: format!("{:?}", task_spec.kind),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        model: config.llm.model.clone(),
+    };
+
+    // 创建 LocalEventLogger (local_event_log=true 时,独立于 dashboard.enabled)
+    let local_logger = if config.dashboard.local_event_log {
+        match publisher::get_report_dir(&config.report) {
+            Ok(artifact_dir) => {
+                // 确保目录存在
+                if let Err(e) = std::fs::create_dir_all(&artifact_dir) {
+                    tracing::warn!(error = %e, "artifact 目录创建失败,跳过本地事件文件");
+                }
+                LocalEventLogger::new(&task_id, &started_event, &artifact_dir)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "获取 artifact 目录失败,跳过本地事件文件");
+                None
+            }
+        }
+    } else {
+        tracing::info!("local_event_log=false,不保存本地事件文件");
+        None
+    };
+
+    // 创建 EventSender (dashboard.enabled=true 时)
+    let event_sender = if config.dashboard.enabled {
+        let sender = EventSender::new(&config.dashboard, &task_id);
+        sender.send_start(&config.dashboard, &started_event).await;
+        Some(sender)
+    } else {
+        None
+    };
 
     let context = if let Some(iid) = issue_iid {
         tracing::info!(issue_iid = iid, "构建上下文");
@@ -634,7 +680,7 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     }
 
     // 8. 生成报告并发布
-    let trajectory = Trajectory::new();
+    let trajectory = Trajectory::with_logging(task_id.clone(), local_logger, event_sender);
     // 取出 Orchestrator 累积的真实 token 使用统计
     let usage_stats = orchestrator.take_usage_stats();
     let report_data = build_report(
@@ -651,6 +697,22 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     let html = devnpc::report::html::generate_html(&report_data);
     let report_url = publisher::publish(&html, &config.report.target, &config.report).await?;
     tracing::info!(report_url = %report_url, "报告已发布");
+
+    // 8.5 flush dashboard 推送和本地事件文件 (spec §4.4)
+    let finished_event = TaskFinishedEvent {
+        task_id: task_id.clone(),
+        status: ci_outcome_to_task_status(&ci_outcome),
+        duration_secs: report_data.duration_secs,
+        total_tokens: report_data.token_total,
+        estimated_cost_usd: report_data.cost_estimate.estimated_cost_usd,
+        mr_url: report_data.mr_url.clone(),
+        ci_url: report_data.ci_url.clone(),
+        summary: report_data.summary.clone(),
+        error: ci_outcome_error(&ci_outcome),
+        finished_at: chrono::Utc::now().to_rfc3339(),
+    };
+    trajectory.finish(&config.dashboard, &finished_event).await;
+    tracing::info!(task_id = %task_id, "dashboard 推送和本地事件文件已 flush");
 
     // 9. 评论 MR 或输出结果
     let summary_text = format!(
@@ -1049,9 +1111,85 @@ fn print_config() -> Result<()> {
     }
 }
 
+/// CiOutcome 转换为 TaskStatus (spec §4.4)
+fn ci_outcome_to_task_status(ci_outcome: &CiOutcome) -> TaskStatus {
+    match ci_outcome {
+        CiOutcome::Passed { .. } => TaskStatus::Success,
+        CiOutcome::Failed { .. } => TaskStatus::CiFailed,
+        CiOutcome::Timeout { .. } => TaskStatus::Timeout,
+        CiOutcome::Error { .. } => TaskStatus::Failed,
+    }
+}
+
+/// CiOutcome 提取错误信息 (spec §4.4)
+fn ci_outcome_error(ci_outcome: &CiOutcome) -> Option<String> {
+    match ci_outcome {
+        CiOutcome::Passed { .. } => None,
+        CiOutcome::Failed { last_error, .. } => Some(last_error.clone()),
+        CiOutcome::Timeout { stage, .. } => Some(format!("阶段: {stage}")),
+        CiOutcome::Error { reason, .. } => Some(reason.clone()),
+    }
+}
+
 fn print_info() {
     println!("devnpc {}", env!("CARGO_PKG_VERSION"));
     println!("基于 GitLab 的企业级研发流程 AI 智能体");
     println!();
     println!("基于 adk-rust 框架: LlmAgent + Runner + FunctionTool");
+}
+
+#[cfg(test)]
+mod dashboard_integration_tests {
+    use super::*;
+    use devnpc::ci::controller::CiOutcome;
+    use devnpc_core::report::event_schema::TaskStatus;
+
+    #[test]
+    fn ci_outcome_passed_maps_to_success() {
+        let outcome = CiOutcome::Passed {
+            mr_iid: 1,
+            pipeline_id: 100,
+            attempts: 1,
+        };
+        assert_eq!(ci_outcome_to_task_status(&outcome), TaskStatus::Success);
+        assert!(ci_outcome_error(&outcome).is_none());
+    }
+
+    #[test]
+    fn ci_outcome_failed_maps_to_ci_failed() {
+        let outcome = CiOutcome::Failed {
+            mr_iid: 1,
+            last_error: "编译错误".to_string(),
+            attempts: 2,
+        };
+        assert_eq!(ci_outcome_to_task_status(&outcome), TaskStatus::CiFailed);
+        assert_eq!(ci_outcome_error(&outcome).as_deref(), Some("编译错误"));
+    }
+
+    #[test]
+    fn ci_outcome_timeout_maps_to_timeout() {
+        let outcome = CiOutcome::Timeout {
+            mr_iid: 1,
+            stage: "build".to_string(),
+        };
+        assert_eq!(ci_outcome_to_task_status(&outcome), TaskStatus::Timeout);
+        assert_eq!(ci_outcome_error(&outcome).as_deref(), Some("阶段: build"));
+    }
+
+    #[test]
+    fn ci_outcome_error_maps_to_failed() {
+        let outcome = CiOutcome::Error {
+            mr_iid: 1,
+            reason: "MR 创建失败".to_string(),
+        };
+        assert_eq!(ci_outcome_to_task_status(&outcome), TaskStatus::Failed);
+        assert_eq!(ci_outcome_error(&outcome).as_deref(), Some("MR 创建失败"));
+    }
+
+    #[test]
+    fn dashboard_disabled_by_default() {
+        let config = devnpc::config::DashboardConfig::default();
+        assert!(!config.enabled, "默认不启用 dashboard 推送");
+        assert!(config.local_event_log, "默认保存本地事件文件");
+    }
 }

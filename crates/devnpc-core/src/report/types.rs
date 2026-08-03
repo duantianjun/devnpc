@@ -19,31 +19,6 @@ pub enum TrajectoryEvent {
     Deviation { step: String, unexpected: Vec<String> },
 }
 
-/// 轨迹
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Trajectory {
-    pub events: Vec<TrajectoryEvent>,
-}
-
-impl Trajectory {
-    pub fn new() -> Self {
-        Self { events: Vec::new() }
-    }
-
-    /// 记录 LLM 调用
-    pub fn record_llm_call(&mut self, iteration: usize) {
-        self.events.push(TrajectoryEvent::LlmCall { iteration });
-    }
-
-    /// 记录工具调用
-    pub fn record_tool_call(&mut self, name: &str, success: bool) {
-        self.events.push(TrajectoryEvent::ToolCall {
-            name: name.to_string(),
-            success,
-        });
-    }
-}
-
 // ============================================================
 // 报告数据
 // ============================================================
@@ -139,31 +114,6 @@ impl Default for ReportData {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn trajectory_new_is_empty() {
-        let t = Trajectory::new();
-        assert!(t.events.is_empty());
-    }
-
-    #[test]
-    fn trajectory_record_llm_call() {
-        let mut t = Trajectory::new();
-        t.record_llm_call(1);
-        assert_eq!(t.events.len(), 1);
-        assert!(matches!(t.events[0], TrajectoryEvent::LlmCall { iteration: 1 }));
-    }
-
-    #[test]
-    fn trajectory_record_tool_call() {
-        let mut t = Trajectory::new();
-        t.record_tool_call("read_file", true);
-        assert_eq!(t.events.len(), 1);
-        assert!(matches!(
-            &t.events[0],
-            TrajectoryEvent::ToolCall { name, success } if name == "read_file" && *success
-        ));
-    }
 
     #[test]
     fn report_data_default_has_unknown_status() {

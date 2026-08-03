@@ -5,9 +5,131 @@
 
 // re-export core 类型 (向后兼容现有 use crate::report::collector::* 路径)
 pub use devnpc_core::report::types::{
-    CostEstimate, ReportData, TeamStepSummary, Trajectory, TrajectoryEvent,
+    CostEstimate, ReportData, TeamStepSummary, TrajectoryEvent,
     TrajectoryEventSummary, TrajectorySummary,
 };
+
+// ============================================================
+// Trajectory (持有本地日志和推送组件, spec §4.3)
+// ============================================================
+
+use devnpc_core::report::event_schema::ExecutionEvent;
+
+use super::sender::{EventSender, LocalEventLogger};
+
+/// 轨迹 (本地定义,持有三个可选组件)
+///
+/// - `events`: 内存事件列表 (始终存在,兼容现有逻辑)
+/// - `local_logger`: 本地文件记录 (`local_event_log=true` 时存在)
+/// - `sender`: 实时推送 (`dashboard.enabled=true` 时存在)
+pub struct Trajectory {
+    /// 内存事件列表 (现状,始终存在)
+    pub events: Vec<TrajectoryEvent>,
+    /// 本地文件记录器 (None 时跳过文件写入)
+    local_logger: Option<LocalEventLogger>,
+    /// 事件推送器 (None 时跳过推送)
+    sender: Option<EventSender>,
+    /// task_id
+    task_id: String,
+}
+
+impl Trajectory {
+    /// 现状构造 (无日志无推送,兼容现有测试)
+    pub fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            local_logger: None,
+            sender: None,
+            task_id: String::new(),
+        }
+    }
+
+    /// 带本地日志和推送的构造 (spec §4.3)
+    pub fn with_logging(
+        task_id: String,
+        local_logger: Option<LocalEventLogger>,
+        sender: Option<EventSender>,
+    ) -> Self {
+        Self {
+            events: Vec::new(),
+            local_logger,
+            sender,
+            task_id,
+        }
+    }
+
+    /// 记录 LLM 调用
+    ///
+    /// 同时: 推入内存 events + 转发到本地日志 + 转发到推送器
+    pub fn record_llm_call(&mut self, iteration: usize) {
+        self.events.push(TrajectoryEvent::LlmCall { iteration });
+
+        if self.local_logger.is_some() || self.sender.is_some() {
+            let exec_event = ExecutionEvent::LlmCall {
+                iteration: iteration as u32,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                latency_ms: 0,
+            };
+            if let Some(logger) = &self.local_logger {
+                logger.log_event(&exec_event);
+            }
+            if let Some(sender) = &self.sender {
+                sender.send(exec_event);
+            }
+        }
+    }
+
+    /// 记录工具调用
+    pub fn record_tool_call(&mut self, name: &str, success: bool) {
+        self.events.push(TrajectoryEvent::ToolCall {
+            name: name.to_string(),
+            success,
+        });
+
+        if self.local_logger.is_some() || self.sender.is_some() {
+            let exec_event = ExecutionEvent::ToolCall {
+                name: name.to_string(),
+                success,
+                latency_ms: 0,
+                detail: String::new(),
+            };
+            if let Some(logger) = &self.local_logger {
+                logger.log_event(&exec_event);
+            }
+            if let Some(sender) = &self.sender {
+                sender.send(exec_event);
+            }
+        }
+    }
+
+    /// 获取 task_id
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    /// 任务结束: flush 本地日志 + 推送 TaskFinishedEvent
+    ///
+    /// 消费 self (任务结束后不再使用)。
+    pub async fn finish(
+        self,
+        config: &crate::config::DashboardConfig,
+        finished: &devnpc_core::report::event_schema::TaskFinishedEvent,
+    ) {
+        if let Some(logger) = &self.local_logger {
+            logger.finish(finished);
+        }
+        if let Some(sender) = self.sender {
+            sender.finish(config, finished.clone()).await;
+        }
+    }
+}
+
+impl Default for Trajectory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 use std::sync::{Arc, Mutex};
 
@@ -280,5 +402,153 @@ mod tests {
         let collector = TrajectoryCollector::from_trajectory(&traj);
         let events = collector.events();
         assert_eq!(events.len(), 2);
+    }
+
+    // ============================================================
+    // Trajectory 改造测试 (spec §4.3)
+    // ============================================================
+
+    use devnpc_core::report::event_schema::{
+        TaskFinishedEvent, TaskStartedEvent, TaskStatus,
+    };
+    use tempfile::tempdir;
+
+    fn make_started_for_traj(task_id: &str) -> TaskStartedEvent {
+        TaskStartedEvent {
+            task_id: task_id.to_string(),
+            project: "test".to_string(),
+            mr_iid: None,
+            pipeline_id: None,
+            task_description: "test".to_string(),
+            task_kind: "manual".to_string(),
+            started_at: "2026-08-03T10:00:00Z".to_string(),
+            model: "test".to_string(),
+        }
+    }
+
+    fn make_finished_for_traj(task_id: &str) -> TaskFinishedEvent {
+        TaskFinishedEvent {
+            task_id: task_id.to_string(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 1000,
+            estimated_cost_usd: 0.01,
+            mr_url: None,
+            ci_url: None,
+            summary: "done".to_string(),
+            error: None,
+            finished_at: "2026-08-03T10:01:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn trajectory_new_is_empty_without_logger_or_sender() {
+        let t = Trajectory::new();
+        assert!(t.events.is_empty());
+        assert!(t.task_id().is_empty());
+    }
+
+    #[test]
+    fn trajectory_new_record_llm_call_backward_compat() {
+        // 无 logger/sender 时,record_llm_call 仅推入 events
+        let mut t = Trajectory::new();
+        t.record_llm_call(1);
+        assert_eq!(t.events.len(), 1);
+        assert!(matches!(t.events[0], TrajectoryEvent::LlmCall { iteration: 1 }));
+    }
+
+    #[test]
+    fn trajectory_new_record_tool_call_backward_compat() {
+        let mut t = Trajectory::new();
+        t.record_tool_call("read_file", true);
+        assert_eq!(t.events.len(), 1);
+        assert!(matches!(
+            &t.events[0],
+            TrajectoryEvent::ToolCall { name, success } if name == "read_file" && *success
+        ));
+    }
+
+    #[test]
+    fn trajectory_with_logging_holds_logger() {
+        let dir = tempdir().unwrap();
+        let task_id = "traj-with-logging";
+        let started = make_started_for_traj(task_id);
+        let logger = LocalEventLogger::new(task_id, &started, dir.path());
+
+        let t = Trajectory::with_logging(task_id.to_string(), logger, None);
+        assert_eq!(t.task_id(), task_id);
+        assert!(t.events.is_empty());
+    }
+
+    #[test]
+    fn trajectory_record_llm_call_forwards_to_logger() {
+        let dir = tempdir().unwrap();
+        let task_id = "traj-forward-llm";
+        let started = make_started_for_traj(task_id);
+        let logger = LocalEventLogger::new(task_id, &started, dir.path());
+
+        let mut t = Trajectory::with_logging(task_id.to_string(), logger, None);
+        t.record_llm_call(1);
+
+        // 内存 events 应有 1 条
+        assert_eq!(t.events.len(), 1);
+
+        // 本地文件应有 2 行: task_started + execution
+        let file_path = dir.path().join(format!("{task_id}.jsonl"));
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("llm_call"));
+    }
+
+    #[test]
+    fn trajectory_record_tool_call_forwards_to_logger() {
+        let dir = tempdir().unwrap();
+        let task_id = "traj-forward-tool";
+        let started = make_started_for_traj(task_id);
+        let logger = LocalEventLogger::new(task_id, &started, dir.path());
+
+        let mut t = Trajectory::with_logging(task_id.to_string(), logger, None);
+        t.record_tool_call("write_file", true);
+
+        assert_eq!(t.events.len(), 1);
+
+        let file_path = dir.path().join(format!("{task_id}.jsonl"));
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("tool_call"));
+        assert!(lines[1].contains("write_file"));
+    }
+
+    #[test]
+    fn trajectory_record_llm_call_no_logger_no_sender_works() {
+        // 无 logger/sender 时不应 panic
+        let mut t = Trajectory::with_logging("none".to_string(), None, None);
+        t.record_llm_call(1);
+        t.record_tool_call("test", false);
+        assert_eq!(t.events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn trajectory_finish_writes_task_finished_to_file() {
+        let dir = tempdir().unwrap();
+        let task_id = "traj-finish";
+        let started = make_started_for_traj(task_id);
+        let logger = LocalEventLogger::new(task_id, &started, dir.path());
+
+        let mut t = Trajectory::with_logging(task_id.to_string(), logger, None);
+        t.record_llm_call(1);
+
+        let config = crate::config::DashboardConfig::default();
+        let finished = make_finished_for_traj(task_id);
+        t.finish(&config, &finished).await;
+
+        let file_path = dir.path().join(format!("{task_id}.jsonl"));
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        // task_started + execution + task_finished = 3 行
+        assert_eq!(lines.len(), 3);
+        assert!(lines[2].contains("task_finished"));
     }
 }

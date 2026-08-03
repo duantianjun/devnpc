@@ -88,10 +88,10 @@ impl LocalEventLogger {
 
         // flush 并关闭文件
         if let Ok(mut guard) = self.writer.lock() {
-            if let Some(w) = guard.as_mut() {
-                if let Err(e) = w.flush() {
-                    tracing::warn!(task_id = %self.task_id, error = %e, "事件文件 flush 失败");
-                }
+            if let Some(w) = guard.as_mut()
+                && let Err(e) = w.flush()
+            {
+                tracing::warn!(task_id = %self.task_id, error = %e, "事件文件 flush 失败");
             }
             // 设为 None 标记已关闭
             *guard = None;
@@ -117,7 +117,6 @@ impl LocalEventLogger {
                 if let Err(e) = writer.flush() {
                     tracing::warn!(task_id = %self.task_id, error = %e, "事件文件 flush 失败");
                     *guard = None;
-                    return;
                 }
             }
             Err(e) => {
@@ -178,10 +177,10 @@ impl EventSender {
     ///
     /// channel 满时丢弃事件并 tracing::warn。
     pub fn send(&self, event: ExecutionEvent) {
-        if let Some(tx) = &self.tx {
-            if tx.try_send(event).is_err() {
-                tracing::warn!(task_id = %self.task_id, "EventSender channel 满,丢弃事件");
-            }
+        if let Some(tx) = &self.tx
+            && tx.try_send(event).is_err()
+        {
+            tracing::warn!(task_id = %self.task_id, "EventSender channel 满,丢弃事件");
         }
     }
 
