@@ -1,5 +1,7 @@
 //! 端到端集成测试: 完整推送 + 查询 + SSE + 导入流程
 
+mod common;
+
 use axum::body::Body;
 use axum::http::Request;
 use devnpc_dashboard::realtime::RealtimeHub;
@@ -8,6 +10,8 @@ use devnpc_dashboard::state::AppState;
 use devnpc_dashboard::storage::queries::Storage;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+use common::TestServer;
 
 fn make_app() -> AppState {
     AppState {
@@ -150,4 +154,20 @@ async fn e2e_stats_endpoints_respond() {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }
+}
+
+// ============================================================
+// Phase 5: 真实 HTTP server (随机端口) 端到端测试
+// ============================================================
+
+/// 冒烟测试: dashboard 能在随机端口启动并响应 GET /
+#[tokio::test]
+async fn dashboard_starts_and_serves_index() {
+    let server = TestServer::start().await;
+    let resp = server.client().get(&server.base_url).send().await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "GET / 应返回 2xx, 实际: {}",
+        resp.status()
+    );
 }
