@@ -1,6 +1,7 @@
 //! 路由组装与静态资源服务
 
 pub mod api;
+pub mod views;
 
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};

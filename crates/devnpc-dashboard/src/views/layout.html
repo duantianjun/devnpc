@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}devnpc Dashboard{% endblock %}</title>
+    <!-- LayUI CSS (用户后续放入 static/layui/) -->
+    <link rel="stylesheet" href="/static/layui/css/layui.css">
+    <!-- 自定义样式 -->
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body class="layui-layout-body">
+<div class="layui-layout layui-layout-admin">
+    <!-- 顶部导航 -->
+    <div class="layui-header">
+        <div class="layui-logo">devnpc Dashboard</div>
+        <ul class="layui-nav layui-layout-left">
+            <li class="layui-nav-item"><a href="/">任务列表</a></li>
+            <li class="layui-nav-item"><a href="/realtime">实时监控</a></li>
+        </ul>
+    </div>
+
+    <!-- 侧边栏导航 -->
+    <div class="layui-side layui-bg-black">
+        <div class="layui-side-scroll">
+            <ul class="layui-nav layui-nav-tree" lay-filter="side-nav">
+                <li class="layui-nav-item {% if active_nav == "tasks" %}layui-this{% endif %}">
+                    <a href="/">任务列表</a>
+                </li>
+                <li class="layui-nav-item {% if active_nav == "realtime" %}layui-this{% endif %}">
+                    <a href="/realtime">实时监控</a>
+                </li>
+                <li class="layui-nav-item {% if active_nav == "trends" %}layui-this{% endif %}">
+                    <a href="/trends">趋势统计</a>
+                </li>
+                <li class="layui-nav-item {% if active_nav == "cost" %}layui-this{% endif %}">
+                    <a href="/cost">成本分析</a>
+                </li>
+                <li class="layui-nav-item {% if active_nav == "ci" %}layui-this{% endif %}">
+                    <a href="/ci">CI 自愈</a>
+                </li>
+                <li class="layui-nav-item {% if active_nav == "sop" %}layui-this{% endif %}">
+                    <a href="/sop">SOP 偏离</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- 主内容区 -->
+    <div class="layui-body">
+        <div class="layui-card">
+            <div class="layui-card-header">
+                <h2>{% block page_title %}{% endblock %}</h2>
+            </div>
+            <div class="layui-card-body">
+                {% block content %}{% endblock %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- LayUI JS (用户后续放入 static/layui/) -->
+<script src="/static/layui/layui.js"></script>
+<script>
+// 全局 LayUI 模块加载
+layui.use(['element', 'layer'], function(){
+    var element = layui.element;
+});
+</script>
+
+<!-- 子页面专属脚本 -->
+{% block scripts %}{% endblock %}
+</body>
+</html>
