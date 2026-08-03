@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use devnpc::config::DashboardConfig;
-use devnpc::report::sender::EventSender;
+use devnpc::report::sender::{EventSender, LocalEventLogger};
 use devnpc_core::report::event_schema::{
     ExecutionEvent, TaskFinishedEvent, TaskStartedEvent, TaskStatus,
 };
@@ -184,4 +184,79 @@ async fn finish_posts_task_finished_and_flushes() {
 
     wait_for_request(&mock, "/api/events/batch", 1).await;
     wait_for_request(&mock, "/api/events/finish", 1).await;
+}
+
+// ============================================================
+// LocalEventLogger 测试
+// ============================================================
+
+/// LocalEventLogger 应在 artifact_dir 下生成 {task_id}.jsonl,
+/// 按顺序写入 task_started / execution / task_finished 行
+#[test]
+fn local_logger_writes_jsonl_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let task_id = "log-1";
+
+    let started = make_started(task_id);
+    // 实际 API: LocalEventLogger::new 返回 Option<Self>
+    let logger = LocalEventLogger::new(task_id, &started, dir.path()).expect("logger 创建失败");
+
+    logger.log_event(&make_llm_call(1));
+    logger.log_event(&make_tool_call("read_file"));
+
+    let finished = make_finished(task_id, TaskStatus::Success);
+    logger.finish(&finished);
+
+    // 校验文件存在且为 4 行
+    let file_path = dir.path().join(format!("{task_id}.jsonl"));
+    let content = std::fs::read_to_string(&file_path).expect("jsonl 文件应存在");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 4, "应有 4 行 (started + 2 exec + finished)");
+
+    // 第一行 kind=task_started
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(first["kind"], "task_started", "首行应为 task_started");
+    assert_eq!(first["task_id"], task_id);
+
+    // 中间两行 kind=execution
+    let mid: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(mid["kind"], "execution");
+    assert!(mid["event"]["type"].is_string(), "execution 行应含 event.type");
+
+    // 末行 kind=task_finished
+    let last: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+    assert_eq!(last["kind"], "task_finished");
+    assert_eq!(last["status"], "success");
+}
+
+/// LocalEventLogger 生成的 .jsonl 文件应可被 dashboard Storage 导入
+#[test]
+fn local_logger_file_importable_by_dashboard() {
+    use devnpc_dashboard::storage::queries::Storage;
+
+    // 1. 用 LocalEventLogger 生成 .jsonl
+    let dir = tempfile::tempdir().unwrap();
+    let task_id = format!("imp-{}", uuid::Uuid::new_v4());
+    let started = make_started(&task_id);
+    let logger = LocalEventLogger::new(&task_id, &started, dir.path()).expect("logger 创建失败");
+    logger.log_event(&make_llm_call(1));
+    logger.log_event(&make_tool_call("read_file"));
+    logger.finish(&make_finished(&task_id, TaskStatus::Success));
+
+    let file_path = dir.path().join(format!("{task_id}.jsonl"));
+    let content = std::fs::read_to_string(&file_path).unwrap();
+    assert!(!content.is_empty(), "jsonl 文件不应为空");
+
+    // 2. 用 dashboard 的 Storage 直接导入,验证文件可被解析写入
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("import.db");
+    // Storage::open 接收 &str
+    let db_path_str = db_path.to_str().expect("临时 DB 路径含非 UTF-8 字符");
+    let storage = Storage::open(db_path_str).expect("打开 dashboard Storage 失败");
+    let result = storage
+        .import_from_jsonl(&content)
+        .expect("dashboard 导入 .jsonl 失败");
+    assert_eq!(result.task_id, task_id, "导入返回的 task_id 应匹配");
+    assert_eq!(result.events_count, 2, "应导入 2 条 execution 事件");
+    assert!(!result.skipped, "首次导入不应跳过");
 }
