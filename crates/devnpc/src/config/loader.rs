@@ -284,6 +284,23 @@ fn load_internal(
                 "CI_ISSUE_IID",
             ),
         },
+        dashboard: crate::config::DashboardConfig {
+            // enabled 由 URL 是否非空决定
+            enabled: {
+                let url = env::get_or_default("DEVNPC_DASHBOARD_URL", "");
+                !url.is_empty()
+            },
+            url: env::get_or_default("DEVNPC_DASHBOARD_URL", ""),
+            token: env::get_or_default("DEVNPC_DASHBOARD_TOKEN", ""),
+            batch_size: env::get_usize("DEVNPC_DASHBOARD_BATCH_SIZE")?
+                .unwrap_or(20),
+            batch_interval_secs: env::get_u64("DEVNPC_DASHBOARD_BATCH_INTERVAL_SECS")?
+                .unwrap_or(3),
+            // local_event_log 默认 true,显式设为 "false" 才关闭
+            local_event_log: env::get_optional("DEVNPC_DASHBOARD_LOCAL_LOG")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+        },
     })
 }
 
@@ -696,6 +713,152 @@ mod tests {
             "DEVNPC_TEST_NEW_CI_POLL_TIMEOUT",
             "DEVNPC_TEST_NEW_CI_PIPELINE_TIMEOUT",
             "DEVNPC_TEST_NEW_CI_MAX_RETRIES",
+        ] {
+            unsafe { std::env::remove_var(key); }
+        }
+    }
+
+    /// 串行锁: dashboard 测试间共享全局 DEVNPC_DASHBOARD_* 环境变量,必须串行执行
+    static DASHBOARD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn load_dashboard_config_defaults_when_env_missing() {
+        let _lock = DASHBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH_API_KEY", "sk"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH_BASE_URL", "https://api.test.com/v1"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH_MODEL", "m"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH_GITLAB_URL", "https://gl.test.com"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH_GITLAB_TOKEN", "t"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH_PROJECT_ID", "1"); }
+        // 清除 dashboard 相关环境变量
+        unsafe { std::env::remove_var("DEVNPC_DASHBOARD_URL"); }
+        unsafe { std::env::remove_var("DEVNPC_DASHBOARD_TOKEN"); }
+        unsafe { std::env::remove_var("DEVNPC_DASHBOARD_LOCAL_LOG"); }
+        unsafe { std::env::remove_var("DEVNPC_DASHBOARD_BATCH_SIZE"); }
+        unsafe { std::env::remove_var("DEVNPC_DASHBOARD_BATCH_INTERVAL_SECS"); }
+
+        let config = load_internal(
+            "DEVNPC_TEST_DASH_API_KEY",
+            "DEVNPC_TEST_DASH_BASE_URL",
+            "DEVNPC_TEST_DASH_MODEL",
+            "DEVNPC_TEST_DASH_GITLAB_URL",
+            "DEVNPC_TEST_DASH_GITLAB_TOKEN",
+            "DEVNPC_TEST_DASH_PROJECT_ID",
+            "DEVNPC_TEST_DASH_MAX_ITERATIONS",
+            "DEVNPC_TEST_DASH_MAX_CI_RETRIES",
+            "DEVNPC_TEST_DASH_SOP_MODE",
+            "DEVNPC_TEST_DASH_REPORT_TARGET",
+            "DEVNPC_TEST_DASH_MODEL_ROUTING",
+            "DEVNPC_TEST_DASH_CMD_ALLOWLIST",
+            "DEVNPC_TEST_DASH_CMD_DENYLIST",
+            "DEVNPC_TEST_DASH_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_DASH_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_DASH_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_DASH_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_DASH_SUMMARY_README_LINES",
+            "DEVNPC_TEST_DASH_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_DASH_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_DASH_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_DASH_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_DASH_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_DASH_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_DASH_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_DASH_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_DASH_CI_MAX_RETRIES",
+            None,
+        )
+        .unwrap();
+
+        // 未配置 URL → enabled=false
+        assert!(!config.dashboard.enabled);
+        // local_event_log 默认 true
+        assert!(config.dashboard.local_event_log);
+        // 批量阈值默认值
+        assert_eq!(config.dashboard.batch_size, 20);
+        assert_eq!(config.dashboard.batch_interval_secs, 3);
+
+        for key in [
+            "DEVNPC_TEST_DASH_API_KEY",
+            "DEVNPC_TEST_DASH_BASE_URL",
+            "DEVNPC_TEST_DASH_MODEL",
+            "DEVNPC_TEST_DASH_GITLAB_URL",
+            "DEVNPC_TEST_DASH_GITLAB_TOKEN",
+            "DEVNPC_TEST_DASH_PROJECT_ID",
+        ] {
+            unsafe { std::env::remove_var(key); }
+        }
+    }
+
+    #[test]
+    fn load_dashboard_config_from_env() {
+        let _lock = DASHBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH2_API_KEY", "sk"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH2_BASE_URL", "https://api.test.com/v1"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH2_MODEL", "m"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH2_GITLAB_URL", "https://gl.test.com"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH2_GITLAB_TOKEN", "t"); }
+        unsafe { std::env::set_var("DEVNPC_TEST_DASH2_PROJECT_ID", "1"); }
+        // 设置 dashboard 环境变量
+        unsafe { std::env::set_var("DEVNPC_DASHBOARD_URL", "http://dashboard:8080"); }
+        unsafe { std::env::set_var("DEVNPC_DASHBOARD_TOKEN", "secret-token"); }
+        unsafe { std::env::set_var("DEVNPC_DASHBOARD_BATCH_SIZE", "50"); }
+        unsafe { std::env::set_var("DEVNPC_DASHBOARD_BATCH_INTERVAL_SECS", "10"); }
+        unsafe { std::env::set_var("DEVNPC_DASHBOARD_LOCAL_LOG", "false"); }
+
+        let config = load_internal(
+            "DEVNPC_TEST_DASH2_API_KEY",
+            "DEVNPC_TEST_DASH2_BASE_URL",
+            "DEVNPC_TEST_DASH2_MODEL",
+            "DEVNPC_TEST_DASH2_GITLAB_URL",
+            "DEVNPC_TEST_DASH2_GITLAB_TOKEN",
+            "DEVNPC_TEST_DASH2_PROJECT_ID",
+            "DEVNPC_TEST_DASH2_MAX_ITERATIONS",
+            "DEVNPC_TEST_DASH2_MAX_CI_RETRIES",
+            "DEVNPC_TEST_DASH2_SOP_MODE",
+            "DEVNPC_TEST_DASH2_REPORT_TARGET",
+            "DEVNPC_TEST_DASH2_MODEL_ROUTING",
+            "DEVNPC_TEST_DASH2_CMD_ALLOWLIST",
+            "DEVNPC_TEST_DASH2_CMD_DENYLIST",
+            "DEVNPC_TEST_DASH2_DEFAULT_TIMEOUT",
+            "DEVNPC_TEST_DASH2_READ_FILE_MAX_LINES",
+            "DEVNPC_TEST_DASH2_LOG_PARSER_MAX_FAILURES",
+            "DEVNPC_TEST_DASH2_KEY_FILE_PATTERNS",
+            "DEVNPC_TEST_DASH2_SUMMARY_README_LINES",
+            "DEVNPC_TEST_DASH2_SUMMARY_MAIN_RS_LINES",
+            "DEVNPC_TEST_DASH2_SUMMARY_OTHER_LINES",
+            "DEVNPC_TEST_DASH2_CTX_MAX_COMMITS",
+            "DEVNPC_TEST_DASH2_CTX_MAX_PIPELINES",
+            "DEVNPC_TEST_DASH2_CTX_MAX_FAILURES",
+            "DEVNPC_TEST_DASH2_CI_POLL_INTERVAL",
+            "DEVNPC_TEST_DASH2_CI_POLL_TIMEOUT",
+            "DEVNPC_TEST_DASH2_CI_PIPELINE_TIMEOUT",
+            "DEVNPC_TEST_DASH2_CI_MAX_RETRIES",
+            None,
+        )
+        .unwrap();
+
+        // 配置了 URL → enabled=true
+        assert!(config.dashboard.enabled);
+        assert_eq!(config.dashboard.url, "http://dashboard:8080");
+        assert_eq!(config.dashboard.token, "secret-token");
+        assert_eq!(config.dashboard.batch_size, 50);
+        assert_eq!(config.dashboard.batch_interval_secs, 10);
+        // 显式关闭本地日志
+        assert!(!config.dashboard.local_event_log);
+
+        // 清理
+        for key in [
+            "DEVNPC_TEST_DASH2_API_KEY",
+            "DEVNPC_TEST_DASH2_BASE_URL",
+            "DEVNPC_TEST_DASH2_MODEL",
+            "DEVNPC_TEST_DASH2_GITLAB_URL",
+            "DEVNPC_TEST_DASH2_GITLAB_TOKEN",
+            "DEVNPC_TEST_DASH2_PROJECT_ID",
+            "DEVNPC_DASHBOARD_URL",
+            "DEVNPC_DASHBOARD_TOKEN",
+            "DEVNPC_DASHBOARD_BATCH_SIZE",
+            "DEVNPC_DASHBOARD_BATCH_INTERVAL_SECS",
+            "DEVNPC_DASHBOARD_LOCAL_LOG",
         ] {
             unsafe { std::env::remove_var(key); }
         }

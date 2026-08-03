@@ -186,6 +186,7 @@ mod tests {
             cost: crate::config::CostConfig::default(),
             tools: crate::config::ToolsConfig::default(),
             trigger: crate::config::TriggerConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
         }
     }
 

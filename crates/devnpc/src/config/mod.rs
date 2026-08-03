@@ -187,6 +187,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     /// 触发源配置 (trigger/parser.rs / main.rs)
     pub trigger: TriggerConfig,
+    /// Dashboard 推送配置 (spec §4.1)
+    pub dashboard: DashboardConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -483,9 +485,77 @@ impl Default for TriggerConfig {
     }
 }
 
+/// Dashboard 推送配置 (spec §4.1)
+///
+/// 通过 .env 配置,未配置 URL 时 enabled=false,不推送。
+/// local_event_log 默认 true,即使 dashboard 未启用也保存本地事件文件。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DashboardConfig {
+    /// 是否启用 dashboard 推送 (默认 false,未配置 URL 时不推送)
+    pub enabled: bool,
+    /// Dashboard 服务地址 (DEVNPC_DASHBOARD_URL)
+    pub url: String,
+    /// 推送鉴权 token (DEVNPC_DASHBOARD_TOKEN)
+    pub token: String,
+    /// 批量推送阈值,事件数累积到此次数触发 POST (默认 20)
+    pub batch_size: usize,
+    /// 批量推送时间阈值,距上次推送超过此秒数触发 POST (默认 3)
+    pub batch_interval_secs: u64,
+    /// 是否保存本地 .jsonl 事件文件 (默认 true,独立于 enabled)
+    pub local_event_log: bool,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            token: String::new(),
+            batch_size: 20,
+            batch_interval_secs: 3,
+            local_event_log: true,
+        }
+    }
+}
+
 impl Config {
     /// 加载配置 (env + .devnpc.md + 默认值三层合并)
     pub fn load() -> Result<Self> {
         loader::load()
+    }
+}
+
+#[cfg(test)]
+mod dashboard_config_tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_config_default_has_safe_values() {
+        let cfg = DashboardConfig::default();
+        // 默认不启用推送 (降级安全)
+        assert!(!cfg.enabled);
+        // 默认保存本地事件文件
+        assert!(cfg.local_event_log);
+        // 批量阈值
+        assert_eq!(cfg.batch_size, 20);
+        assert_eq!(cfg.batch_interval_secs, 3);
+        // URL/token 默认空
+        assert!(cfg.url.is_empty());
+        assert!(cfg.token.is_empty());
+    }
+
+    #[test]
+    fn dashboard_config_can_be_enabled() {
+        let cfg = DashboardConfig {
+            enabled: true,
+            url: "http://dashboard:8080".into(),
+            token: "secret".into(),
+            batch_size: 50,
+            batch_interval_secs: 10,
+            local_event_log: false,
+        };
+        assert!(cfg.enabled);
+        assert_eq!(cfg.url, "http://dashboard:8080");
+        assert!(!cfg.local_event_log);
     }
 }
