@@ -1013,6 +1013,7 @@ dependencies = [
  "chrono",
  "clap",
  "devnpc-core",
+ "devnpc-dashboard",
  "futures",
  "mockall",
  "regex",
@@ -1069,6 +1070,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "mime_guess",
+ "reqwest 0.12.28",
  "rusqlite",
  "rust-embed",
  "serde",
@@ -1082,6 +1084,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

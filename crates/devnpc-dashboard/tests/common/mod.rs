@@ -2,6 +2,11 @@
 //!
 //! 在随机端口启动一个真实的 devnpc-dashboard 实例,供集成测试发送 HTTP 请求。
 //! 同时提供事件构造 helper,保证各测试用例数据一致。
+//!
+//! 注意: 本模块被多个测试 crate (e2e / import) 独立编译,某些 helper 在某个 crate 中
+//! 可能未被使用。此处整体允许 dead_code,避免在 clippy -D warnings 下报错。
+
+#![allow(dead_code)]
 
 use std::sync::Arc;
 

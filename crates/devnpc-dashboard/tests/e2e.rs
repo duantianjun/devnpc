@@ -360,15 +360,10 @@ async fn sse_stream_receives_pushed_events() {
     let mut stream = sse_resp.bytes_stream();
     let mut received = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        match tokio::time::timeout_at(deadline, stream.next()).await {
-            Ok(Some(Ok(chunk))) => {
-                received.push_str(&String::from_utf8_lossy(&chunk));
-                if received.contains("data:") {
-                    break;
-                }
-            }
-            _ => break,
+    while let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, stream.next()).await {
+        received.push_str(&String::from_utf8_lossy(&chunk));
+        if received.contains("data:") {
+            break;
         }
     }
     assert!(
