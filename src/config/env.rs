@@ -132,6 +132,55 @@ pub fn get_model_routing(var: &str) -> Result<Option<ModelRoutingConfig>> {
     }
 }
 
+/// 从当前目录的 .env 文件加载环境变量 (不覆盖已存在的)
+///
+/// 行为:
+/// - 文件不存在时静默跳过 (返回 Ok)
+/// - 已存在的环境变量不会被覆盖 (与 dotenv 默认行为一致)
+/// - 仅做简单的 KEY=VALUE 解析,支持 # 注释和引号
+///
+/// 设计: 不引入 dotenvy 依赖,内置极简实现满足本地开发需求。
+pub fn load_env_file() {
+    load_env_file_from(".env");
+}
+
+/// 从指定路径加载 .env 文件 (供测试使用)
+pub fn load_env_file_from(path: &str) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return; // 文件不存在,静默跳过
+    };
+    for (lineno, line) in content.lines().enumerate() {
+        let line = line.trim();
+        // 空行或注释跳过
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // 解析 KEY=VALUE
+        let Some(eq_pos) = line.find('=') else {
+            tracing::warn!("load_env_file: {path}:{lineno} 缺少 = 跳过: {line}");
+            continue;
+        };
+        let key = line[..eq_pos].trim();
+        let mut value = line[eq_pos + 1..].trim();
+        // 去除首尾引号 (支持 "value" 和 'value')
+        if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            value = &value[1..value.len() - 1];
+        }
+        if key.is_empty() {
+            continue;
+        }
+        // 已存在则不覆盖
+        if std::env::var_os(key).is_some() {
+            continue;
+        }
+        // SAFETY: 单线程启动阶段调用,无并发风险
+        unsafe { std::env::set_var(key, value); }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

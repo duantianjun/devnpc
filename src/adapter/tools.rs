@@ -90,6 +90,29 @@ fn create_read_file_tool(file_io: FileIo, read_config: &crate::config::ReadFileC
     )
 }
 
+/// 解析裸命令名为绝对路径 (跨平台 PATH 查找)
+///
+/// Windows 用 `where.exe`,Unix 用 `which`。返回第一个匹配的可执行文件路径。
+/// 解析失败返回 None,调用方可回退到原裸命令让 spawn 自身处理错误。
+fn resolve_command_path(cmd: &str) -> Option<String> {
+    // 路径分隔符检查已在外层 run_command 完成,此处 cmd 应为裸命令名
+    let resolver = if cfg!(windows) { "where" } else { "which" };
+    let output = std::process::Command::new(resolver)
+        .arg(cmd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // where.exe 可能返回多行 (多个匹配),取第一个
+    stdout
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// write_file: 写入 workspace 内文件 (全量覆盖)
 fn create_write_file_tool(file_io: FileIo) -> FunctionTool {
     FunctionTool::new(
@@ -215,7 +238,10 @@ fn create_run_command_tool(
                     .map(std::time::Duration::from_secs)
                     .unwrap_or(default_timeout);
 
-                let mut process = tokio::process::Command::new(cmd);
+                // Windows 下裸命令 (如 "cargo") 不在系统 PATH 直接查找范围,
+                // 需先用 where.exe/which 解析为绝对路径再 spawn,避免 "program not found"。
+                let resolved_cmd = resolve_command_path(cmd).unwrap_or_else(|| cmd.to_string());
+                let mut process = tokio::process::Command::new(&resolved_cmd);
                 process
                     .args(&cmd_args)
                     .current_dir(&workspace)
@@ -223,7 +249,7 @@ fn create_run_command_tool(
                     .stderr(std::process::Stdio::piped());
 
                 let child = process.spawn().map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("启动命令失败: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("启动命令失败: {e} (cmd={cmd}, resolved={resolved_cmd})"))
                 })?;
 
                 match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -638,7 +664,17 @@ fn parse_file(
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("路径验证失败: {e}"))
     })?;
     let lang = detect_language(&full).ok_or_else(|| {
-        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts: {path}"))
+        // 对非源码文件 (如 .md/.txt/.yml) 给出明确引导,避免 Agent 反复重试
+        let hint = match full.extension().and_then(|e| e.to_str()) {
+            Some("md") | Some("markdown") | Some("txt") | Some("rst") => {
+                " (非源码文件,请改用 read_file 工具读取文本内容)"
+            }
+            Some("yml") | Some("yaml") | Some("json") | Some("toml") | Some("xml") => {
+                " (配置文件,请改用 read_file 工具读取文本内容)"
+            }
+            _ => "",
+        };
+        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT", format!("不支持的文件类型,仅支持 .rs/.java/.py/.js/.jsx/.ts/.tsx/.go/.c/.h/.cpp/.hpp/.cc/.cxx/.rb/.php/.swift/.kt/.kts: {path}{hint}"))
     })?;
     let source = std::fs::read_to_string(&full).map_err(|e| {
         adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR", format!("读取文件失败: {e}"))
@@ -697,7 +733,7 @@ fn create_aft_view_symbol_tool(file_io: FileIo, tools_config: &crate::config::To
                 let (tree, lang, source) = parse_file(&file_io, path)?;
                 let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, max_symbol_depth, lang)
                     .ok_or_else(|| {
-                        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
+                        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol} (请先调用 aft_outline 查看文件中实际可用的符号名)"))
                     })?;
                 let text = node.utf8_text(source.as_bytes()).map_err(|e| {
                     adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("提取文本失败: {e}"))
@@ -730,7 +766,7 @@ fn create_aft_edit_symbol_tool(file_io: FileIo, tools_config: &crate::config::To
                 let (tree, lang, source) = parse_file(&file_io, path)?;
                 let node = find_symbol_node(tree.root_node(), source.as_bytes(), symbol, 0, max_symbol_depth, lang)
                     .ok_or_else(|| {
-                        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol}"))
+                        adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::Internal, "EXECUTION_ERROR",format!("未找到符号: {symbol} (请先调用 aft_outline 查看文件中实际可用的符号名)"))
                     })?;
 
                 let start = node.start_byte();
@@ -853,7 +889,7 @@ fn create_aft_ast_replace_tool(file_io: FileIo) -> FunctionTool {
                     regex::Regex::new(pattern_str)
                 }
                 .map_err(|e| {
-                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT",format!("无效正则: {e}"))
+                    adk_rust::AdkError::new(adk_rust::ErrorComponent::Tool, adk_rust::ErrorCategory::InvalidInput, "INVALID_ARGUMENT",format!("无效正则 (pattern 应为正则表达式,非源码原文): {e}"))
                 })?;
 
                 let (_tree, lang, source) = parse_file(&file_io, path)?;

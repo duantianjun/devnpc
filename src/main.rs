@@ -70,6 +70,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // 启动时自动加载当前目录 .env (不覆盖已存在的环境变量)
+    // 这样本地运行无需手动 Get-Content .env | Set-Item 逐条加载
+    devnpc::config::env::load_env_file();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -508,10 +512,14 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
     let initial_state = context.as_ref().map(build_initial_state).unwrap_or_default();
 
     // 执行 Agent
-    // - Team 模式 (Implement 任务 + feature-team 配置就绪): PM→Developer→Tester 协作流程
-    // - 单 Agent 模式 (Fix/Review/其他): 主 Agent 直接执行 (带记忆注入)
+    // - Team 模式 (Complex + Implement 任务 + feature-team 配置就绪): PM→Developer→Tester 协作流程
+    // - 单 Agent 模式 (Simple 任务 或 Fix/Review/其他): 主 Agent 直接执行 (带记忆注入)
+    //
+    // 简单任务 (read/summarize/explain 等) 即使 TaskKind=Implement 也跳过 Team,
+    // 避免 "读取+总结" 类只读任务被路由到完整 Team 编排造成资源浪费与误改代码。
     let use_team_mode = team_available
-        && matches!(task_spec.kind, devnpc::trigger::parser::TaskKind::Implement);
+        && matches!(task_spec.kind, devnpc::trigger::parser::TaskKind::Implement)
+        && matches!(task_complexity, devnpc::adapter::orchestrator::TaskComplexity::Complex);
 
     // Team 协作步骤 (仅在 Team 模式下填充,用于报告可视化)
     let mut team_steps_for_report: Vec<devnpc::report::collector::TeamStepSummary> = Vec::new();
@@ -575,10 +583,15 @@ async fn run(task: Option<&str>, dry_run: bool) -> Result<()> {
         let usage_stats = orchestrator.take_usage_stats();
         let duration_secs = (end_time - start_time).num_seconds().max(0) as u64;
         let success = matches!(ci_outcome, CiOutcome::Passed { .. });
+
+        // 优先从 GitLab MR changes 接口获取精确的修改文件列表 (用于记忆检索),
+        // 失败或非 MR 场景回退到旧的占位表示。
+        let modified_files = fetch_ci_modified_files(&*gitlab, config.gitlab.project_id, &ci_outcome).await;
+
         let record = devnpc::adapter::memory::TaskRecord {
             task_description: task_spec.description.clone(),
             result_summary: summary.clone(),
-            modified_files: ci_outcome_modified_files(&ci_outcome),
+            modified_files,
             duration_secs,
             token_consumption: usage_stats.total_tokens().max(0) as u64,
             success,
@@ -809,17 +822,54 @@ async fn run_ci_controller(
 
 /// 从 CI 结果中提取修改的文件列表
 ///
-/// 当前实现基于 CI 状态推断:
-/// - Passed: 推断 Agent 修改了代码 (分支已推送),无法精确获取文件列表 (需调用 GitLab API)
-/// - Failed/Timeout: 无修改
-///
-/// TODO: 后续可通过 GitLab API 获取 MR diff 精确文件列表
-fn ci_outcome_modified_files(ci_outcome: &CiOutcome) -> Vec<String> {
+fn ci_outcome_mr_iid(ci_outcome: &CiOutcome) -> u64 {
     match ci_outcome {
-        CiOutcome::Passed { mr_iid, .. } if *mr_iid > 0 => {
-            vec![format!("MR !{}", mr_iid)]
+        CiOutcome::Passed { mr_iid, .. }
+        | CiOutcome::Failed { mr_iid, .. }
+        | CiOutcome::Timeout { mr_iid, .. }
+        | CiOutcome::Error { mr_iid, .. } => *mr_iid,
+    }
+}
+
+/// 获取 CI 闭环实际修改的文件列表 (用于长期记忆检索)。
+/// 优先通过 GitLab MR changes 接口获取精确的 diff 文件列表;失败或非 MR
+/// 场景回退到基于 CI 状态的占位表示 (Passed → "MR !{iid}",其他 → 空)。
+async fn fetch_ci_modified_files(
+    gitlab: &dyn GitlabApi,
+    project_id: u64,
+    ci_outcome: &CiOutcome,
+) -> Vec<String> {
+    let mr_iid = ci_outcome_mr_iid(ci_outcome);
+    if mr_iid > 0 {
+        match gitlab
+            .get_mr_changes(project_id, mr_iid)
+            .await
+        {
+            Ok(changes) if !changes.is_empty() => {
+                // renamed 用 new_path, deleted 用 old_path,其余用 new_path
+                let files: Vec<String> = changes
+                    .iter()
+                    .map(|c| {
+                        if c.deleted_file {
+                            c.old_path.clone()
+                        } else {
+                            c.new_path.clone()
+                        }
+                    })
+                    .collect();
+                tracing::info!(count = files.len(), "从 GitLab MR changes 获取到修改文件列表");
+                return files;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "获取 MR changes 失败,回退到占位表示");
+            }
         }
-        _ => Vec::new(),
+    }
+    if mr_iid > 0 {
+        vec![format!("MR !{mr_iid}")]
+    } else {
+        Vec::new()
     }
 }
 

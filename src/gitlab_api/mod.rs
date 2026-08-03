@@ -54,6 +54,20 @@ pub trait GitlabApi: Send + Sync {
         path: &str,
         ref_: &str,
     ) -> Result<Vec<RepoTreeEntry>>;
+
+    // === P4.5: MR diff 变更文件 ===
+
+    /// 获取 MR 的变更文件列表 (GET /projects/:id/merge_requests/:mr_iid/changes)
+    ///
+    /// 用于 CI 报告 / 长期记忆持久化时记录精确的 modified files。
+    /// 提供默认实现返回空列表,便于测试 mock 与不支持该能力的实现无需额外适配。
+    async fn get_mr_changes(
+        &self,
+        _project_id: u64,
+        _mr_iid: u64,
+    ) -> Result<Vec<MergeRequestChange>> {
+        Ok(Vec::new())
+    }
 }
 
 // === 数据模型 ===
@@ -133,3 +147,15 @@ pub struct NoteAuthor {
     pub username: String,
     pub name: String,
 }
+
+/// MR 单条变更 (GET /projects/:id/merge_requests/:mr_iid/changes 的 changes 数组元素)
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MergeRequestChange {
+    pub old_path: String,
+    pub new_path: String,
+    /// `new` | `deleted` | `renamed`
+    pub new_file: bool,
+    pub renamed_file: bool,
+    pub deleted_file: bool,
+}
+

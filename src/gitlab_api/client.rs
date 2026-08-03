@@ -8,7 +8,8 @@ use reqwest::{Method, StatusCode};
 use crate::error::{DevnpcError, Result};
 
 use super::{
-    CreateMrReq, GitlabApi, Issue, Job, MergeRequest, Note, Pipeline, RepoTreeEntry,
+    CreateMrReq, GitlabApi, Issue, Job, MergeRequest, MergeRequestChange, Note, Pipeline,
+    RepoTreeEntry,
 };
 
 /// reqwest 实现
@@ -112,6 +113,13 @@ impl GitlabClient {
         format!(
             "{}/api/v4/projects/{}/merge_requests/{}",
             self.base_url, project_id, iid
+        )
+    }
+
+    fn mr_changes_url(&self, project_id: u64, mr_iid: u64) -> String {
+        format!(
+            "{}/api/v4/projects/{}/merge_requests/{}/changes",
+            self.base_url, project_id, mr_iid
         )
     }
 
@@ -325,6 +333,22 @@ impl GitlabApi for GitlabClient {
     ) -> Result<Vec<RepoTreeEntry>> {
         let url = self.tree_url(project_id, path, ref_);
         self.get(&url).await
+    }
+
+    async fn get_mr_changes(
+        &self,
+        project_id: u64,
+        mr_iid: u64,
+    ) -> Result<Vec<MergeRequestChange>> {
+        let url = self.mr_changes_url(project_id, mr_iid);
+        // GET /projects/:id/merge_requests/:mr_iid/changes 返回包装对象: {"changes": [...]}
+        let resp = self.send(reqwest::Method::GET, &url, None).await?;
+        let json: serde_json::Value = resp.json().await?;
+        let changes: Vec<MergeRequestChange> = json
+            .get("changes")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(changes)
     }
 }
 
@@ -750,5 +774,56 @@ mod tests {
         let entries = client.list_tree(1, "", "main").await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "README.md");
+    }
+
+    #[tokio::test]
+    async fn get_mr_changes_parses_changes_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/merge_requests/7/changes"))
+            .and(header("PRIVATE-TOKEN", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "changes": [
+                    {
+                        "old_path": "src/auth.rs",
+                        "new_path": "src/auth.rs",
+                        "new_file": false,
+                        "renamed_file": false,
+                        "deleted_file": false
+                    },
+                    {
+                        "old_path": "src/old.rs",
+                        "new_path": "src/new.rs",
+                        "new_file": false,
+                        "renamed_file": true,
+                        "deleted_file": false
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let changes = client.get_mr_changes(1, 7).await.unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].new_path, "src/auth.rs");
+        assert_eq!(changes[1].old_path, "src/old.rs");
+        assert!(changes[1].renamed_file);
+    }
+
+    #[tokio::test]
+    async fn get_mr_changes_handles_empty_or_missing_changes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/1/merge_requests/8/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "changes": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let changes = client.get_mr_changes(1, 8).await.unwrap();
+        assert!(changes.is_empty());
     }
 }
