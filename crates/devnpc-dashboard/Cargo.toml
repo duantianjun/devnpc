@@ -58,3 +58,9 @@ mime_guess = "2"
 tempfile = "3"
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
+# HTTP mock (devnpc 侧测试统一使用;dashboard 自身 E2E 不直接需要)
+wiremock = "0.6"
+# 测试用 HTTP 客户端 (发送推送请求 + 读取 SSE 流)
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
+# SSE 流的 StreamExt::next
+futures = "0.3"
