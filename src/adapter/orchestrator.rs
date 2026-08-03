@@ -459,9 +459,25 @@ impl Orchestrator {
 
         let mut result = String::new();
         let mut err_count = 0u32;
-        while let Some(event_result) = stream.next().await {
-            match event_result {
-                Ok(event) => {
+        // 子 Agent 整体超时保护 (避免 LLM 卡死或工具循环导致无限等待)
+        // 5 分钟覆盖大部分任务 (含多次 LLM 调用 + 工具执行)
+        let sub_agent_timeout = std::time::Duration::from_secs(300);
+        let deadline = tokio::time::Instant::now() + sub_agent_timeout;
+        loop {
+            let next_event = tokio::time::timeout_at(deadline, stream.next()).await;
+            match next_event {
+                Err(_) => {
+                    tracing::error!(
+                        timeout_secs = sub_agent_timeout.as_secs(),
+                        "子 Agent 执行超时,强制中断 (LLM 卡死或工具循环)"
+                    );
+                    return Err(crate::error::DevnpcError::Llm(format!(
+                        "子 Agent 执行超时 ({}s),已中断",
+                        sub_agent_timeout.as_secs()
+                    )));
+                }
+                Ok(None) => break,
+                Ok(Some(Ok(event))) => {
                     // 累积 usage (只统计非 partial 事件,避免重复计数)
                     if !event.llm_response.partial {
                         self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
@@ -477,7 +493,7 @@ impl Orchestrator {
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Some(Err(e))) => {
                     err_count += 1;
                     tracing::warn!(error = %e, "子 Agent 流式事件错误");
                 }
@@ -534,9 +550,25 @@ impl Orchestrator {
 
         let mut final_text = String::new();
         let mut err_count = 0u32;
-        while let Some(event_result) = stream.next().await {
-            match event_result {
-                Ok(event) => {
+        // 主 Agent 整体超时保护 (避免 LLM 卡死或工具循环导致无限等待)
+        // 10 分钟覆盖复杂任务 (含 Team 编排多角色 + 多次 LLM 调用 + 工具执行)
+        let main_agent_timeout = std::time::Duration::from_secs(600);
+        let deadline = tokio::time::Instant::now() + main_agent_timeout;
+        loop {
+            let next_event = tokio::time::timeout_at(deadline, stream.next()).await;
+            match next_event {
+                Err(_) => {
+                    tracing::error!(
+                        timeout_secs = main_agent_timeout.as_secs(),
+                        "主 Agent 执行超时,强制中断 (LLM 卡死或工具循环)"
+                    );
+                    return Err(crate::error::DevnpcError::Llm(format!(
+                        "主 Agent 执行超时 ({}s),已中断",
+                        main_agent_timeout.as_secs()
+                    )));
+                }
+                Ok(None) => break,
+                Ok(Some(Ok(event))) => {
                     if !event.llm_response.partial {
                         self.accumulate_usage(event.llm_response.usage_metadata.as_ref());
                     }
@@ -551,7 +583,7 @@ impl Orchestrator {
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Some(Err(e))) => {
                     err_count += 1;
                     tracing::warn!(error = %e, "主 Agent 流式事件错误");
                 }
