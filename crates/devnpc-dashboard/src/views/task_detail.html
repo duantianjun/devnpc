@@ -1,0 +1,145 @@
+{% extends "layout.html" %}
+
+{% block title %}任务详情 - {{ task.task_description }}{% endblock %}
+{% block page_title %}任务详情{% endblock %}
+
+{% block content %}
+<div class="layui-row layui-col-space15">
+    <!-- 任务元信息卡片 -->
+    <div class="layui-col-md12">
+        <div class="layui-card">
+            <div class="layui-card-header">任务元信息</div>
+            <div class="layui-card-body">
+                <table class="layui-table">
+                    <colgroup><col width="160"><col></colgroup>
+                    <tbody>
+                        <tr><td>任务 ID</td><td><code>{{ task.task_id }}</code></td></tr>
+                        <tr><td>状态</td><td>{{ task.status }}</td></tr>
+                        <tr><td>项目</td><td>{{ task.project }}</td></tr>
+                        <tr><td>任务描述</td><td>{{ task.task_description }}</td></tr>
+                        <tr><td>类型</td><td>{{ task.task_kind }}</td></tr>
+                        <tr><td>模型</td><td>{{ task.model }}</td></tr>
+                        <tr><td>耗时</td><td>{{ task.duration_secs.unwrap_or(0) }} 秒</td></tr>
+                        <tr><td>Token</td><td>{{ task.total_tokens }} (输入 {{ task.input_tokens }} / 输出 {{ task.output_tokens }})</td></tr>
+                        <tr><td>成本</td><td>${{ task.estimated_cost_usd }}</td></tr>
+                        <tr><td>开始时间</td><td>{{ task.started_at }}</td></tr>
+                        <tr><td>结束时间</td><td>
+                            {% if let Some(f) = task.finished_at.as_deref() %}
+                                {{ f }}
+                            {% else %}
+                                <span class="layui-badge layui-bg-blue">运行中</span>
+                            {% endif %}
+                        </td></tr>
+                        {% if let Some(url) = task.mr_url.as_deref() %}
+                        <tr><td>MR 链接</td><td><a href="{{ url }}" target="_blank">{{ url }}</a></td></tr>
+                        {% endif %}
+                        {% if let Some(url) = task.ci_url.as_deref() %}
+                        <tr><td>CI 链接</td><td><a href="{{ url }}" target="_blank">{{ url }}</a></td></tr>
+                        {% endif %}
+                        {% if let Some(s) = task.summary.as_deref() %}
+                        <tr><td>验收摘要</td><td>{{ s }}</td></tr>
+                        {% endif %}
+                        {% if let Some(e) = task.error.as_deref() %}
+                        <tr><td>错误信息</td><td><span style="color:red;">{{ e }}</span></td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 执行时间线 -->
+    <div class="layui-col-md12">
+        <div class="layui-card">
+            <div class="layui-card-header">执行时间线</div>
+            <div class="layui-card-body">
+                <ul class="layui-timeline" id="timeline">
+                    <li class="layui-timeline-item">
+                        <i class="layui-icon layui-icon-loading-1"></i>
+                        <div class="layui-timeline-content layui-text">加载中...</div>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+layui.use(['layer'], function(){
+    var layer = layui.layer;
+
+    // 从 URL 提取 task_id (路径形如 /tasks/{id})
+    var taskId = window.location.pathname.split('/').pop();
+
+    // 加载事件列表
+    fetch('/api/tasks/' + taskId + '/events')
+        .then(function(r){
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(events){
+            if (!events || events.length === 0) {
+                document.getElementById('timeline').innerHTML =
+                    '<li class="layui-timeline-item"><div class="layui-timeline-content">暂无事件</div></li>';
+                return;
+            }
+            // 不同事件类型用不同图标和颜色 (spec §6.3.2)
+            var iconMap = {
+                'llm_call':      {icon: 'layui-icon-chat',       color: '#1E9FFF'},
+                'tool_call':     {icon: 'layui-icon-util',       color: '#5FB878'},
+                'sop_step':      {icon: 'layui-icon-template-1', color: '#FFB800'},
+                'ci_status':     {icon: 'layui-icon-templei-1',  color: '#01AAED'},
+                'team_handoff':  {icon: 'layui-icon-username',   color: '#FF5722'}
+            };
+
+            var html = events.map(function(e){
+                var cfg = iconMap[e.event_type] || {icon: 'layui-icon-circle-dot', color: '#999'};
+                var payload = {};
+                try { payload = JSON.parse(e.payload); } catch(_) {}
+                var detail = '';
+                // 根据事件类型构造详情文本
+                switch (e.event_type) {
+                    case 'llm_call':
+                        detail = '第 ' + payload.iteration + ' 次调用, prompt=' +
+                                 payload.prompt_tokens + ', completion=' +
+                                 payload.completion_tokens + ', 延时 ' + payload.latency_ms + 'ms';
+                        break;
+                    case 'tool_call':
+                        detail = '工具 <code>' + payload.name + '</code> ' +
+                                 (payload.success ? '成功' : '失败') +
+                                 ' (' + payload.latency_ms + 'ms) ' + payload.detail;
+                        break;
+                    case 'sop_step':
+                        detail = '步骤 <code>' + payload.step + '</code> 状态: ' +
+                                 payload.status + (payload.note ? ' - ' + payload.note : '');
+                        break;
+                    case 'ci_status':
+                        detail = 'Pipeline #' + payload.pipeline_id + ' ' + payload.status +
+                                 ' (第 ' + payload.attempt + ' 次重试)';
+                        break;
+                    case 'team_handoff':
+                        detail = payload.from_role + ' → ' + payload.to_role +
+                                 ' (signal: ' + payload.signal + ')';
+                        break;
+                    default:
+                        detail = e.payload;
+                }
+                return '<li class="layui-timeline-item">' +
+                    '<i class="layui-icon ' + cfg.icon + '" style="color:' + cfg.color + ';font-size:20px;"></i>' +
+                    '<div class="layui-timeline-content layui-text">' +
+                    '<h3 class="layui-timeline-title">' + e.created_at + '</h3>' +
+                    '<p><strong>' + e.event_type + '</strong> - ' + detail + '</p>' +
+                    '</div></li>';
+            }).join('');
+            document.getElementById('timeline').innerHTML = html;
+        })
+        .catch(function(err){
+            layer.msg('加载事件失败: ' + err.message, {icon: 2});
+            document.getElementById('timeline').innerHTML =
+                '<li class="layui-timeline-item"><div class="layui-timeline-content" style="color:red;">加载失败: ' + err.message + '</div></li>';
+        });
+});
+</script>
+{% endblock %}

@@ -7,10 +7,20 @@
 
 use askama::Template;
 
+use crate::storage::queries::TaskRow;
+
 /// 任务列表页
 #[derive(Template)]
 #[template(path = "index.html")]
 pub struct IndexTemplate {
     /// 当前激活的导航项标识: tasks/realtime/trends/cost/ci/sop
     pub active_nav: String,
+}
+
+/// 任务详情页
+#[derive(Template)]
+#[template(path = "task_detail.html")]
+pub struct TaskDetailTemplate {
+    pub active_nav: String,
+    pub task: TaskRow,
 }

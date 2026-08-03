@@ -16,7 +16,7 @@ use std::convert::Infallible;
 use askama::Template;
 use crate::auth::require_token;
 use crate::error::DashboardError;
-use crate::server::views::IndexTemplate;
+use crate::server::views::{IndexTemplate, TaskDetailTemplate};
 use crate::state::AppState;
 
 /// 嵌入静态资源 (编译期从 static/ 目录读取)
@@ -39,6 +39,7 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         // === 页面路由 (Phase 4) ===
         .route("/", get(index_page))
+        .route("/tasks/:id", get(task_detail_page))
         .route("/api/tasks", get(api::list_tasks))
         .route("/api/tasks/:id", get(api::get_task))
         .route("/api/tasks/:id/events", get(api::list_task_events))
@@ -89,6 +90,23 @@ pub async fn static_handler(Path(path): Path<String>) -> Response {
 pub async fn index_page() -> Result<Html<String>, DashboardError> {
     let tmpl = IndexTemplate {
         active_nav: "tasks".to_string(),
+    };
+    let html = tmpl.render()?;
+    Ok(Html(html))
+}
+
+/// GET /tasks/:id - 任务详情页
+pub async fn task_detail_page(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Html<String>, DashboardError> {
+    let task = state
+        .storage
+        .get_task(&task_id)?
+        .ok_or_else(|| DashboardError::TaskNotFound(task_id.clone()))?;
+    let tmpl = TaskDetailTemplate {
+        active_nav: "tasks".to_string(),
+        task,
     };
     let html = tmpl.render()?;
     Ok(Html(html))
