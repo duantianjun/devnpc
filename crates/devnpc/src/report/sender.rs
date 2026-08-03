@@ -8,10 +8,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use devnpc_core::report::event_schema::{
-    ExecutionEvent, EventLogEntry, TaskFinishedEvent, TaskStartedEvent,
+    BatchEventsRequest, ExecutionEvent, EventLogEntry, TaskFinishedEvent, TaskStartedEvent,
 };
+
+use crate::config::DashboardConfig;
 
 // ============================================================
 // LocalEventLogger
@@ -119,6 +125,202 @@ impl LocalEventLogger {
             }
         }
     }
+}
+
+// ============================================================
+// EventSender
+// ============================================================
+
+/// 事件推送器 (仅 dashboard.enabled=true 时创建)
+///
+/// 内部通过 mpsc channel 接收事件,后台 task 批量 POST 到 dashboard。
+/// 推送失败不影响主任务执行 (tracing::warn 记录)。
+pub struct EventSender {
+    /// channel 发送端 (send() 写入此 channel)
+    tx: Option<mpsc::Sender<ExecutionEvent>>,
+    /// task_id
+    task_id: String,
+    /// 后台 task handle (finish 时 await)
+    handle: Option<JoinHandle<()>>,
+}
+
+impl EventSender {
+    /// 创建推送器并启动后台批量推送 task
+    ///
+    /// 注意: 此方法不发送 TaskStartedEvent,需单独调用 `send_start()`。
+    pub fn new(config: &DashboardConfig, task_id: &str) -> Self {
+        let (tx, rx) = mpsc::channel::<ExecutionEvent>(config.batch_size * 2);
+
+        let batch_config = config.clone();
+        let batch_task_id = task_id.to_string();
+
+        let handle = tokio::spawn(async move {
+            background_batch_loop(rx, &batch_config, &batch_task_id).await;
+        });
+
+        Self {
+            tx: Some(tx),
+            task_id: task_id.to_string(),
+            handle: Some(handle),
+        }
+    }
+
+    /// 推送 TaskStartedEvent (POST /api/events/start)
+    ///
+    /// 失败时 tracing::warn 记录,不返回错误 (不影响主任务)。
+    pub async fn send_start(&self, config: &DashboardConfig, event: &TaskStartedEvent) {
+        let url = format!("{}/api/events/start", config.url.trim_end_matches('/'));
+        let client = reqwest::Client::new();
+        post_with_retry(&client, &url, &config.token, event).await;
+    }
+
+    /// 推送单条事件 (非阻塞,写入 channel)
+    ///
+    /// channel 满时丢弃事件并 tracing::warn。
+    pub fn send(&self, event: ExecutionEvent) {
+        if let Some(tx) = &self.tx {
+            if tx.try_send(event).is_err() {
+                tracing::warn!(task_id = %self.task_id, "EventSender channel 满,丢弃事件");
+            }
+        }
+    }
+
+    /// 任务结束时 flush 并发送 TaskFinishedEvent (POST /api/events/finish)
+    ///
+    /// 1. 关闭 channel (drop tx) 触发后台 task flush 剩余事件
+    /// 2. 等待后台 task 完成
+    /// 3. POST /api/events/finish
+    ///
+    /// 失败时 tracing::warn 记录,不返回错误 (不影响主任务)。
+    pub async fn finish(mut self, config: &DashboardConfig, event: TaskFinishedEvent) {
+        // 关闭 channel,触发后台 task flush
+        self.tx.take();
+
+        // 等待后台 task 完成
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+
+        // POST /api/events/finish
+        let url = format!("{}/api/events/finish", config.url.trim_end_matches('/'));
+        let client = reqwest::Client::new();
+        post_with_retry(&client, &url, &config.token, &event).await;
+    }
+}
+
+// ============================================================
+// 后台批量推送逻辑
+// ============================================================
+
+/// 后台批量推送循环
+///
+/// 触发条件 (任一满足):
+/// - 事件数累积到 batch_size
+/// - 距上次检查超过 batch_interval_secs
+/// - channel 关闭 (任务结束 flush)
+async fn background_batch_loop(
+    mut rx: mpsc::Receiver<ExecutionEvent>,
+    config: &DashboardConfig,
+    task_id: &str,
+) {
+    let mut batch: Vec<ExecutionEvent> = Vec::with_capacity(config.batch_size);
+    let interval = Duration::from_secs(config.batch_interval_secs);
+    let client = reqwest::Client::new();
+
+    loop {
+        let timeout = tokio::time::sleep(interval);
+        tokio::pin!(timeout);
+
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                match maybe_event {
+                    Some(event) => {
+                        batch.push(event);
+                        if batch.len() >= config.batch_size {
+                            flush_batch(&client, config, task_id, &mut batch).await;
+                        }
+                    }
+                    None => {
+                        // channel 关闭, flush 剩余事件并退出
+                        if !batch.is_empty() {
+                            flush_batch(&client, config, task_id, &mut batch).await;
+                        }
+                        break;
+                    }
+                }
+            }
+            _ = &mut timeout => {
+                // 超时触发,如有事件则推送
+                if !batch.is_empty() {
+                    flush_batch(&client, config, task_id, &mut batch).await;
+                }
+            }
+        }
+    }
+}
+
+/// 批量推送一批事件 (POST /api/events/batch)
+///
+/// 失败时指数退避重试 (1s/2s/4s/8s/16s,共 6 次尝试),仍失败则丢弃。
+async fn flush_batch(
+    client: &reqwest::Client,
+    config: &DashboardConfig,
+    task_id: &str,
+    batch: &mut Vec<ExecutionEvent>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+
+    let events = std::mem::take(batch);
+    let request = BatchEventsRequest {
+        task_id: task_id.to_string(),
+        events,
+    };
+
+    let url = format!("{}/api/events/batch", config.url.trim_end_matches('/'));
+    post_with_retry(client, &url, &config.token, &request).await;
+}
+
+/// 带指数退避重试的 POST 请求
+///
+/// 重试延迟: 1s/2s/4s/8s/16s (初始 + 5 次重试 = 6 次尝试)
+async fn post_with_retry<T: serde::Serialize>(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    body: &T,
+) {
+    let delays = [1u64, 2, 4, 8, 16];
+    let mut last_error = String::new();
+
+    for attempt in 0..=5 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(delays[attempt - 1])).await;
+        }
+        match client
+            .post(url)
+            .header("X-Devnpc-Token", token)
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::debug!(attempt, url = %url, "推送成功");
+                return;
+            }
+            Ok(resp) => {
+                last_error = format!("HTTP {}", resp.status());
+                tracing::warn!(attempt, url = %url, status = %resp.status(), "推送失败");
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                tracing::warn!(attempt, url = %url, error = %e, "推送失败");
+            }
+        }
+    }
+
+    tracing::warn!(url = %url, error = %last_error, "推送重试耗尽,放弃");
 }
 
 #[cfg(test)]
@@ -301,5 +503,249 @@ mod local_event_logger_tests {
         let lines: Vec<&str> = content.lines().collect();
         // 1 started + 5 execution = 6 行
         assert_eq!(lines.len(), 6);
+    }
+}
+
+#[cfg(test)]
+mod event_sender_tests {
+    use super::*;
+    use devnpc_core::report::event_schema::{
+        TaskFinishedEvent, TaskStartedEvent, TaskStatus,
+    };
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_config(url: String) -> DashboardConfig {
+        DashboardConfig {
+            enabled: true,
+            url,
+            token: "test-token".to_string(),
+            batch_size: 2, // 小阈值便于测试
+            batch_interval_secs: 60,  // 大阈值,避免时间触发干扰
+            local_event_log: false,
+        }
+    }
+
+    fn make_started(task_id: &str) -> TaskStartedEvent {
+        TaskStartedEvent {
+            task_id: task_id.to_string(),
+            project: "test".to_string(),
+            mr_iid: None,
+            pipeline_id: None,
+            task_description: "test".to_string(),
+            task_kind: "manual".to_string(),
+            started_at: "2026-08-03T10:00:00Z".to_string(),
+            model: "test-model".to_string(),
+        }
+    }
+
+    fn make_finished(task_id: &str) -> TaskFinishedEvent {
+        TaskFinishedEvent {
+            task_id: task_id.to_string(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 1000,
+            estimated_cost_usd: 0.01,
+            mr_url: None,
+            ci_url: None,
+            summary: "done".to_string(),
+            error: None,
+            finished_at: "2026-08-03T10:01:00Z".to_string(),
+        }
+    }
+
+    fn make_llm_event(iteration: u32) -> ExecutionEvent {
+        ExecutionEvent::LlmCall {
+            iteration,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            latency_ms: 500,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_start_posts_to_dashboard() {
+        let server = MockServer::start().await;
+        let config = make_config(server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/start"))
+            .and(header("X-Devnpc-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-start-1");
+        let started = make_started("task-start-1");
+        sender.send_start(&config, &started).await;
+
+        // finish 关闭后台 task (避免泄漏) - mount 通用 mock 接收 finish 和 batch
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        sender.finish(&config, make_finished("task-start-1")).await;
+    }
+
+    #[tokio::test]
+    async fn batch_triggers_on_size_threshold() {
+        let server = MockServer::start().await;
+        let config = make_config(server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/batch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-batch-size");
+        // batch_size=2,发送 2 条触发一次批量推送
+        sender.send(make_llm_event(1));
+        sender.send(make_llm_event(2));
+
+        // 等待后台 task 处理
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // mount finish mock 后再 finish,避免 finish POST 失败重试阻塞
+        Mock::given(method("POST"))
+            .and(path("/api/events/finish"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        sender.finish(&config, make_finished("task-batch-size")).await;
+    }
+
+    #[tokio::test]
+    async fn batch_triggers_on_timeout() {
+        let server = MockServer::start().await;
+        let mut config = make_config(server.uri());
+        config.batch_size = 100; // 大阈值,不会因数量触发
+        config.batch_interval_secs = 1; // 1 秒后触发
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/batch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-batch-timeout");
+        sender.send(make_llm_event(1));
+
+        // 等待超时触发 (1 秒 + 余量)
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/finish"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        sender.finish(&config, make_finished("task-batch-timeout")).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_on_failure_with_backoff() {
+        let server = MockServer::start().await;
+        let config = make_config(server.uri());
+
+        // 前 2 次返回 500,第 3 次返回 200
+        Mock::given(method("POST"))
+            .and(path("/api/events/batch"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/events/batch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-retry");
+        sender.send(make_llm_event(1));
+        sender.send(make_llm_event(2)); // 触发 batch
+
+        // 等待重试完成 (start_paused 使 sleep 立即返回)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/finish"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        sender.finish(&config, make_finished("task-retry")).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discard_after_max_retries() {
+        let server = MockServer::start().await;
+        let config = make_config(server.uri());
+
+        // 所有请求都返回 500
+        Mock::given(method("POST"))
+            .and(path("/api/events/batch"))
+            .respond_with(ResponseTemplate::new(500))
+            // 期望 6 次 (初始 + 5 次重试)
+            .expect(6)
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-discard");
+        sender.send(make_llm_event(1));
+        sender.send(make_llm_event(2)); // 触发 batch
+
+        // 等待所有重试完成
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/finish"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        sender.finish(&config, make_finished("task-discard")).await;
+    }
+
+    #[tokio::test]
+    async fn finish_posts_task_finished() {
+        let server = MockServer::start().await;
+        let config = make_config(server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/api/events/finish"))
+            .and(header("X-Devnpc-Token", "test-token"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-finish");
+        sender.finish(&config, make_finished("task-finish")).await;
+    }
+
+    #[tokio::test]
+    async fn send_does_not_block_when_channel_full() {
+        let server = MockServer::start().await;
+        let mut config = make_config(server.uri());
+        config.batch_size = 1; // 极小 channel
+        config.batch_interval_secs = 3600; // 不触发时间推送
+
+        // mount 通用 200 响应避免 finish/batch 推送阻塞重试
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let sender = EventSender::new(&config, "task-full");
+
+        // 填满 channel (batch_size * 2 = 2 缓冲)
+        for i in 0..10 {
+            sender.send(make_llm_event(i)); // 不应 panic
+        }
+
+        // finish 会 flush 剩余 (mock 已 mount 200)
+        sender.finish(&config, make_finished("task-full")).await;
     }
 }

@@ -90,6 +90,7 @@ rusqlite = { workspace = true }
 rmcp = "1"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tokio-test = "0.4"
 mockall = "0.13"
 tempfile = "3"
