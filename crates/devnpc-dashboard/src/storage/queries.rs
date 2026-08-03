@@ -53,6 +53,22 @@ pub struct EventRow {
     pub created_at: String,
 }
 
+/// 任务列表过滤条件
+#[derive(Debug, Clone, Default)]
+pub struct TaskFilter {
+    pub status: Option<String>,
+    pub project: Option<String>,
+}
+
+/// 任务列表响应 (带分页元信息)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskListResponse {
+    pub tasks: Vec<TaskRow>,
+    pub total: usize,
+    pub page: usize,
+    pub size: usize,
+}
+
 // ============================================================
 // Storage
 // ============================================================
@@ -305,6 +321,87 @@ impl Storage {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    /// 分页 + 过滤查询任务列表 (按 started_at 倒序)
+    pub fn list_tasks(&self, page: usize, size: usize, filter: &TaskFilter) -> Result<TaskListResponse> {
+        let conn = self.conn.lock().unwrap();
+        let page = if page == 0 { 1 } else { page };
+        let size = if size == 0 { 20 } else { size };
+        let offset = ((page - 1) * size) as i64;
+
+        // 动态拼接 WHERE
+        let mut where_clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(s) = &filter.status {
+            where_clauses.push(format!("status = ?{}", where_clauses.len() + 1));
+            params.push(Box::new(s.clone()));
+        }
+        if let Some(p) = &filter.project {
+            where_clauses.push(format!("project = ?{}", where_clauses.len() + 1));
+            params.push(Box::new(p.clone()));
+        }
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+
+        // 总数
+        let count_sql = format!("SELECT COUNT(*) FROM tasks {}", where_sql);
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let total: i64 = conn.query_row(&count_sql, param_refs.as_slice(), |r| r.get(0))?;
+
+        // 分页数据
+        let list_sql = format!(
+            "SELECT task_id, project, mr_iid, pipeline_id, task_description, task_kind, \
+             model, status, started_at, finished_at, duration_secs, total_tokens, \
+             input_tokens, output_tokens, estimated_cost_usd, mr_url, ci_url, summary, \
+             error, ci_retries FROM tasks {} ORDER BY started_at DESC LIMIT ?{} OFFSET ?{}",
+            where_sql,
+            params.len() + 1,
+            params.len() + 2,
+        );
+        let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = params;
+        all_params.push(Box::new(size as i64));
+        all_params.push(Box::new(offset));
+        let all_refs: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&list_sql)?;
+        let tasks: Vec<TaskRow> = stmt
+            .query_map(all_refs.as_slice(), |r| {
+                Ok(TaskRow {
+                    task_id: r.get(0)?,
+                    project: r.get(1)?,
+                    mr_iid: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    pipeline_id: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    task_description: r.get(4)?,
+                    task_kind: r.get(5)?,
+                    model: r.get(6)?,
+                    status: r.get(7)?,
+                    started_at: r.get(8)?,
+                    finished_at: r.get(9)?,
+                    duration_secs: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+                    total_tokens: r.get::<_, i64>(11)? as u64,
+                    input_tokens: r.get::<_, i64>(12)? as u64,
+                    output_tokens: r.get::<_, i64>(13)? as u64,
+                    estimated_cost_usd: r.get(14)?,
+                    mr_url: r.get(15)?,
+                    ci_url: r.get(16)?,
+                    summary: r.get(17)?,
+                    error: r.get(18)?,
+                    ci_retries: r.get::<_, i64>(19)? as u64,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(TaskListResponse {
+            tasks,
+            total: total as usize,
+            page,
+            size,
+        })
     }
 
     // ---- 内部辅助 (已持有锁) ----
@@ -595,5 +692,62 @@ mod tests {
         s.delete_task("t1").unwrap();
         assert!(!s.task_exists("t1").unwrap());
         assert!(s.list_events("t1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_tasks_pagination() {
+        let s = Storage::open_in_memory().unwrap();
+        for i in 0..15 {
+            s.start_task(&sample_started(&format!("t{}", i))).unwrap();
+        }
+        let resp = s.list_tasks(1, 10, &TaskFilter::default()).unwrap();
+        assert_eq!(resp.tasks.len(), 10);
+        assert_eq!(resp.total, 15);
+        assert_eq!(resp.page, 1);
+        assert_eq!(resp.size, 10);
+        let resp2 = s.list_tasks(2, 10, &TaskFilter::default()).unwrap();
+        assert_eq!(resp2.tasks.len(), 5);
+    }
+
+    #[test]
+    fn list_tasks_filter_by_status() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.start_task(&sample_started("t2")).unwrap();
+        // t2 设为 success
+        let f = TaskFinishedEvent {
+            task_id: "t2".into(),
+            status: TaskStatus::Success,
+            duration_secs: 5,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:05:00Z".into(),
+        };
+        s.finish_task(&f).unwrap();
+        let resp = s
+            .list_tasks(1, 100, &TaskFilter { status: Some("running".into()), project: None })
+            .unwrap();
+        assert_eq!(resp.tasks.len(), 1);
+        assert_eq!(resp.tasks[0].task_id, "t1");
+    }
+
+    #[test]
+    fn list_tasks_filter_by_project() {
+        let s = Storage::open_in_memory().unwrap();
+        let mut a = sample_started("t1");
+        a.project = "proj-a".into();
+        let mut b = sample_started("t2");
+        b.project = "proj-b".into();
+        s.start_task(&a).unwrap();
+        s.start_task(&b).unwrap();
+        let resp = s
+            .list_tasks(1, 100, &TaskFilter { status: None, project: Some("proj-a".into()) })
+            .unwrap();
+        assert_eq!(resp.tasks.len(), 1);
+        assert_eq!(resp.tasks[0].task_id, "t1");
     }
 }
