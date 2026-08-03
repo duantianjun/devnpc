@@ -1,0 +1,13 @@
+[package]
+name = "devnpc-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "devnpc 共享类型: 报告数据结构 + dashboard 事件协议"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }

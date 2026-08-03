@@ -1,76 +1,23 @@
-[package]
-name = "devnpc"
-version = "0.1.0"
+[workspace]
+# NOTE: crates/devnpc 成员将在 Phase 1 Task 5 (移动 devnpc src) 执行后取消注释。
+# 当前仅 devnpc-core 可用,临时注释 devnpc 以使 cargo 命令可解析。
+members = ["crates/devnpc-core"]
+# members = ["crates/devnpc-core", "crates/devnpc"]
+resolver = "2"
+
+[workspace.package]
 edition = "2024"
-description = "基于 GitLab 的企业级研发流程 AI 智能体"
 license = "MIT"
 
-[[bin]]
-name = "devnpc"
-path = "src/main.rs"
-
-[lib]
-name = "devnpc"
-path = "src/lib.rs"
-
-[features]
-default = ["deepseek", "openai", "anthropic", "gemini"]
-# 模型提供商 (通过 adk-rust 的同名 feature 启用)
-deepseek = ["adk-rust/deepseek"]
-openai = ["adk-rust/openai"]
-anthropic = ["adk-rust/anthropic"]
-gemini = ["adk-rust/gemini"]
-
-[dependencies]
+[workspace.dependencies]
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-
-# Agent 框架 (adk-rust)
-adk-rust = { version = "1", features = [
-    "minimal",                    # 核心: agents, models, gemini, runner, sessions
-    "openai", "anthropic", "deepseek",  # 其他模型提供商
-    "tools",                      # FunctionTool 系统
-    "graph",                      # 工作流编排
-    "mcp",                        # MCP 协议对接 (stdio)
-    "mcp-http",                   # MCP HTTP/SSE 传输 (streamable HTTP client)
-    "guardrail",                  # 安全护栏
-    "memory",                     # 框架级会话记忆
-    "rag",                        # 检索增强生成
-    "code",                       # 代码执行沙箱
-    "eval",                       # Agent 评估
-] }
-
-# HTTP / GitLab API
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-
-# Webhook 服务器 (axum 与 tokio 生态兼容)
-axum = "0.7"
-tower = "0.5"
-
-# 代码感知工具 (AFT)
-tree-sitter = "0.26"
-tree-sitter-rust = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
-# 新增语言 (Ruby/PHP/Swift/Kotlin)
-tree-sitter-ruby = "0.23"
-tree-sitter-php = "0.24"
-tree-sitter-swift = "0.7"
-tree-sitter-kotlin-sg = "0.4"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-
-# CLI
-clap = { version = "4", features = ["derive", "env"] }
 
 # 日志与错误
 tracing = "0.1"
@@ -78,27 +25,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 
 # 工具
-uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
 regex = "1"
 async-trait = "0.1"
 
-# 长期记忆存储
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+axum = "0.7"
+tower = "0.5"
+
+# 数据库
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# MCP 协议 (通过 adk-rust 的 mcp feature 使用)
-rmcp = "1"
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
 
-[dev-dependencies]
-tokio-test = "0.4"
-mockall = "0.13"
-tempfile = "3"
-wiremock = "0.6"
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("deepseek", "openai", "anthropic", "gemini"))'] }
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-strip = true
+# 代码感知
+tree-sitter = "0.26"
