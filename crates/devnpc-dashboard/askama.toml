@@ -1,0 +1,4 @@
+# askama 模板配置 (askama 0.12 读取 crate 根目录下的 askama.toml)
+# 模板查找目录: src/views/ 下的 .html 文件
+[general]
+dirs = ["src/views"]

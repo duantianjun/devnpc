@@ -1,0 +1,36 @@
+/* devnpc Dashboard 自定义样式 */
+.layui-logo {
+    font-size: 20px;
+    color: #fff;
+    line-height: 60px;
+    padding-left: 20px;
+}
+.layui-body {
+    padding: 15px;
+}
+.log-area {
+    max-height: 300px;
+    overflow-y: auto;
+    background: #fafafa;
+    padding: 8px;
+    font-family: Consolas, Monaco, monospace;
+    font-size: 12px;
+    border: 1px solid #eee;
+}
+.log-line {
+    padding: 2px 0;
+    border-bottom: 1px dashed #eee;
+}
+.log-time {
+    color: #999;
+    margin-right: 8px;
+}
+.log-type {
+    color: #1E9FFF;
+    margin-right: 8px;
+    font-weight: bold;
+}
+.stat-card-value {
+    font-size: 28px;
+    font-weight: bold;
+}
