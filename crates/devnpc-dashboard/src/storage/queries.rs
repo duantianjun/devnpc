@@ -1,11 +1,61 @@
-//! Storage 结构与 CRUD/聚合/导入查询 (Task 3-6 填充)
+//! Storage 结构与数据库查询
+//!
+//! Arc<Mutex<Connection>> 串行化写;WAL 模式下读不阻塞写。
 
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
+use devnpc_core::report::event_schema::{
+    ExecutionEvent, TaskFinishedEvent, TaskStartedEvent,
+};
+
 use crate::error::Result;
 use crate::storage::schema;
+
+// ============================================================
+// 行类型
+// ============================================================
+
+/// tasks 表行映射
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskRow {
+    pub task_id: String,
+    pub project: String,
+    pub mr_iid: Option<u64>,
+    pub pipeline_id: Option<u64>,
+    pub task_description: String,
+    pub task_kind: String,
+    pub model: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub duration_secs: Option<u64>,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub estimated_cost_usd: f64,
+    pub mr_url: Option<String>,
+    pub ci_url: Option<String>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub ci_retries: u64,
+}
+
+/// events 表行映射
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EventRow {
+    pub id: i64,
+    pub task_id: String,
+    pub seq: i64,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+}
+
+// ============================================================
+// Storage
+// ============================================================
 
 /// SQLite 存储层
 #[derive(Clone)]
@@ -33,11 +83,273 @@ impl Storage {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    /// 创建任务记录,状态=running (重复 task_id 返回 TaskConflict)
+    pub fn start_task(&self, e: &TaskStartedEvent) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        if self.task_exists_locked(&conn, &e.task_id)? {
+            return Err(crate::error::DashboardError::TaskConflict(format!(
+                "任务 {} 已存在",
+                e.task_id
+            )));
+        }
+        conn.execute(
+            "INSERT INTO tasks (task_id, project, mr_iid, pipeline_id, task_description, task_kind, model, status, started_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8)",
+            rusqlite::params![
+                e.task_id, e.project, e.mr_iid, e.pipeline_id,
+                e.task_description, e.task_kind, e.model, e.started_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 批量写入执行事件 (task_id 不存在返回 TaskNotFound)
+    pub fn insert_events(&self, task_id: &str, events: &[ExecutionEvent]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        if !self.task_exists_locked(&conn, task_id)? {
+            return Err(crate::error::DashboardError::TaskNotFound(task_id.into()));
+        }
+        // 取当前最大 seq
+        let max_seq: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE task_id = ?1",
+                rusqlite::params![task_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut seq = max_seq;
+        for ev in events {
+            seq += 1;
+            let payload = serde_json::to_string(ev)?;
+            let event_type = match ev {
+                ExecutionEvent::LlmCall { .. } => "llm_call",
+                ExecutionEvent::ToolCall { .. } => "tool_call",
+                ExecutionEvent::SopStep { .. } => "sop_step",
+                ExecutionEvent::CiStatus { .. } => "ci_status",
+                ExecutionEvent::TeamHandoff { .. } => "team_handoff",
+            };
+            conn.execute(
+                "INSERT INTO events (task_id, seq, event_type, payload, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![task_id, seq, event_type, payload, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 任务结束: 更新状态/汇总字段,聚合 tokens 与 ci_retries,写入 sop_deviations
+    pub fn finish_task(&self, e: &TaskFinishedEvent) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        if !self.task_exists_locked(&conn, &e.task_id)? {
+            return Err(crate::error::DashboardError::TaskNotFound(e.task_id.clone()));
+        }
+        if self.task_is_finished_locked(&conn, &e.task_id)? {
+            return Err(crate::error::DashboardError::TaskConflict(format!(
+                "任务 {} 已结束",
+                e.task_id
+            )));
+        }
+        // 聚合 input/output tokens (从 llm_call 事件)
+        let (input_tokens, output_tokens): (u64, u64) = conn
+            .query_row(
+                "SELECT \
+                   COALESCE(SUM(json_extract(payload, '$.prompt_tokens')), 0), \
+                   COALESCE(SUM(json_extract(payload, '$.completion_tokens')), 0) \
+                 FROM events WHERE task_id = ?1 AND event_type = 'llm_call'",
+                rusqlite::params![e.task_id],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .unwrap_or((0, 0));
+        // 聚合 ci_retries (ci_status 事件的最大 attempt)
+        let ci_retries: u64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(json_extract(payload, '$.attempt')), 0) \
+                 FROM events WHERE task_id = ?1 AND event_type = 'ci_status'",
+                rusqlite::params![e.task_id],
+                |r| Ok(r.get::<_, i64>(0)? as u64),
+            )
+            .unwrap_or(0);
+        let status_str = match e.status {
+            devnpc_core::report::event_schema::TaskStatus::Success => "success",
+            devnpc_core::report::event_schema::TaskStatus::Failed => "failed",
+            devnpc_core::report::event_schema::TaskStatus::CiFailed => "ci_failed",
+            devnpc_core::report::event_schema::TaskStatus::Timeout => "timeout",
+        };
+        conn.execute(
+            "UPDATE tasks SET status = ?1, finished_at = ?2, duration_secs = ?3, \
+             total_tokens = ?4, input_tokens = ?5, output_tokens = ?6, \
+             estimated_cost_usd = ?7, mr_url = ?8, ci_url = ?9, summary = ?10, \
+             error = ?11, ci_retries = ?12 WHERE task_id = ?13",
+            rusqlite::params![
+                status_str,
+                e.finished_at,
+                e.duration_secs as i64,
+                e.total_tokens as i64,
+                input_tokens as i64,
+                output_tokens as i64,
+                e.estimated_cost_usd,
+                e.mr_url,
+                e.ci_url,
+                e.summary,
+                e.error,
+                ci_retries as i64,
+                e.task_id,
+            ],
+        )?;
+        // 写入 sop_deviations (从 sop_step 事件中 status=deviated 的)
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT json_extract(payload, '$.step'), json_extract(payload, '$.note') \
+             FROM events WHERE task_id = ?1 AND event_type = 'sop_step' \
+             AND json_extract(payload, '$.status') = 'deviated'",
+        )?;
+        let deviations: Vec<(Option<String>, Option<String>)> = stmt
+            .query_map(rusqlite::params![e.task_id], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        for (step, note) in deviations {
+            conn.execute(
+                "INSERT INTO sop_deviations (task_id, step, note, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![e.task_id, step, note, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 任务是否存在
+    pub fn task_exists(&self, task_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        self.task_exists_locked(&conn, task_id)
+    }
+
+    /// 任务是否已结束 (status != running)
+    pub fn task_is_finished(&self, task_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        self.task_is_finished_locked(&conn, task_id)
+    }
+
+    /// 删除任务及其事件与偏离记录 (覆盖导入时使用)
+    pub fn delete_task(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM sop_deviations WHERE task_id = ?1", rusqlite::params![task_id])?;
+        conn.execute("DELETE FROM events WHERE task_id = ?1", rusqlite::params![task_id])?;
+        conn.execute("DELETE FROM tasks WHERE task_id = ?1", rusqlite::params![task_id])?;
+        Ok(())
+    }
+
+    /// 查询单个任务
+    pub fn get_task(&self, task_id: &str) -> Result<Option<TaskRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT task_id, project, mr_iid, pipeline_id, task_description, task_kind, \
+             model, status, started_at, finished_at, duration_secs, total_tokens, \
+             input_tokens, output_tokens, estimated_cost_usd, mr_url, ci_url, summary, \
+             error, ci_retries FROM tasks WHERE task_id = ?1",
+        )?;
+        let row = stmt
+            .query_row(rusqlite::params![task_id], |r| {
+                Ok(TaskRow {
+                    task_id: r.get(0)?,
+                    project: r.get(1)?,
+                    mr_iid: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    pipeline_id: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    task_description: r.get(4)?,
+                    task_kind: r.get(5)?,
+                    model: r.get(6)?,
+                    status: r.get(7)?,
+                    started_at: r.get(8)?,
+                    finished_at: r.get(9)?,
+                    duration_secs: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+                    total_tokens: r.get::<_, i64>(11)? as u64,
+                    input_tokens: r.get::<_, i64>(12)? as u64,
+                    output_tokens: r.get::<_, i64>(13)? as u64,
+                    estimated_cost_usd: r.get(14)?,
+                    mr_url: r.get(15)?,
+                    ci_url: r.get(16)?,
+                    summary: r.get(17)?,
+                    error: r.get(18)?,
+                    ci_retries: r.get::<_, i64>(19)? as u64,
+                })
+            })
+            .ok();
+        Ok(row)
+    }
+
+    /// 查询任务的事件列表 (按 seq 升序)
+    pub fn list_events(&self, task_id: &str) -> Result<Vec<EventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, seq, event_type, payload, created_at \
+             FROM events WHERE task_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows: Vec<EventRow> = stmt
+            .query_map(rusqlite::params![task_id], |r| {
+                let payload_str: String = r.get(4)?;
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+                Ok(EventRow {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    seq: r.get(2)?,
+                    event_type: r.get(3)?,
+                    payload,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // ---- 内部辅助 (已持有锁) ----
+
+    fn task_exists_locked(&self, conn: &Connection, task_id: &str) -> Result<bool> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    fn task_is_finished_locked(&self, conn: &Connection, task_id: &str) -> Result<bool> {
+        let status: Option<String> = conn.query_row(
+            "SELECT status FROM tasks WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).ok();
+        match status {
+            Some(s) => Ok(s != "running"),
+            None => Ok(false),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use devnpc_core::report::event_schema::{
+        CiStatus, ExecutionEvent, TaskFinishedEvent, TaskStartedEvent, TaskStatus,
+    };
+
+    fn sample_started(task_id: &str) -> TaskStartedEvent {
+        TaskStartedEvent {
+            task_id: task_id.into(),
+            project: "group/proj".into(),
+            mr_iid: Some(42),
+            pipeline_id: Some(100),
+            task_description: "修复 bug".into(),
+            task_kind: "mr_comment".into(),
+            started_at: "2026-08-03T10:00:00Z".into(),
+            model: "deepseek-chat".into(),
+        }
+    }
 
     #[test]
     fn open_in_memory_succeeds() {
@@ -56,5 +368,232 @@ mod tests {
     fn storage_is_clone() {
         let s = Storage::open_in_memory().unwrap();
         let _s2 = s.clone();
+    }
+
+    #[test]
+    fn start_task_inserts_running_row() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        let exists = s.task_exists("t1").unwrap();
+        assert!(exists);
+        let row = s.get_task("t1").unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.project, "group/proj");
+    }
+
+    #[test]
+    fn start_task_duplicate_returns_conflict() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        let err = s.start_task(&sample_started("t1")).unwrap_err();
+        assert!(matches!(err, crate::error::DashboardError::TaskConflict(_)));
+    }
+
+    #[test]
+    fn insert_events_stores_rows() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        let events = vec![
+            ExecutionEvent::LlmCall {
+                iteration: 1,
+                prompt_tokens: 500,
+                completion_tokens: 200,
+                latency_ms: 1500,
+            },
+            ExecutionEvent::ToolCall {
+                name: "read_file".into(),
+                success: true,
+                latency_ms: 50,
+                detail: "src/main.rs".into(),
+            },
+        ];
+        s.insert_events("t1", &events).unwrap();
+        let rows = s.list_events("t1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].seq, 1);
+        assert_eq!(rows[1].seq, 2);
+        assert_eq!(rows[0].event_type, "llm_call");
+    }
+
+    #[test]
+    fn insert_events_unknown_task_returns_not_found() {
+        let s = Storage::open_in_memory().unwrap();
+        let events = vec![ExecutionEvent::LlmCall {
+            iteration: 1,
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            latency_ms: 100,
+        }];
+        let err = s.insert_events("nope", &events).unwrap_err();
+        assert!(matches!(err, crate::error::DashboardError::TaskNotFound(_)));
+    }
+
+    #[test]
+    fn finish_task_updates_status_and_tokens() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.insert_events(
+            "t1",
+            &vec![
+                ExecutionEvent::LlmCall {
+                    iteration: 1,
+                    prompt_tokens: 500,
+                    completion_tokens: 200,
+                    latency_ms: 1500,
+                },
+                ExecutionEvent::LlmCall {
+                    iteration: 2,
+                    prompt_tokens: 300,
+                    completion_tokens: 100,
+                    latency_ms: 1200,
+                },
+            ],
+        )
+        .unwrap();
+        let finished = TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 45,
+            total_tokens: 1100,
+            estimated_cost_usd: 0.05,
+            mr_url: Some("https://gitlab.com/mr/42".into()),
+            ci_url: None,
+            summary: "已修复".into(),
+            error: None,
+            finished_at: "2026-08-03T10:01:00Z".into(),
+        };
+        s.finish_task(&finished).unwrap();
+        let row = s.get_task("t1").unwrap().unwrap();
+        assert_eq!(row.status, "success");
+        assert_eq!(row.total_tokens, 1100);
+        // 聚合: prompt_tokens 500+300=800, completion 200+100=300
+        assert_eq!(row.input_tokens, 800);
+        assert_eq!(row.output_tokens, 300);
+        assert_eq!(row.duration_secs, Some(45));
+        assert!(row.finished_at.is_some());
+    }
+
+    #[test]
+    fn finish_task_aggregates_ci_retries() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.insert_events(
+            "t1",
+            &vec![
+                ExecutionEvent::CiStatus {
+                    pipeline_id: 100,
+                    status: CiStatus::Failed,
+                    attempt: 1,
+                },
+                ExecutionEvent::CiStatus {
+                    pipeline_id: 100,
+                    status: CiStatus::Failed,
+                    attempt: 2,
+                },
+                ExecutionEvent::CiStatus {
+                    pipeline_id: 100,
+                    status: CiStatus::Passed,
+                    attempt: 3,
+                },
+            ],
+        )
+        .unwrap();
+        let finished = TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 100,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:02:00Z".into(),
+        };
+        s.finish_task(&finished).unwrap();
+        let row = s.get_task("t1").unwrap().unwrap();
+        assert_eq!(row.ci_retries, 3);
+    }
+
+    // 注意: finish_task_writes_sop_deviations 测试已移至 Task 5 (依赖 sop_stats 方法)
+
+    #[test]
+    fn finish_task_unknown_returns_not_found() {
+        let s = Storage::open_in_memory().unwrap();
+        let finished = TaskFinishedEvent {
+            task_id: "nope".into(),
+            status: TaskStatus::Failed,
+            duration_secs: 0,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: String::new(),
+            error: None,
+            finished_at: "2026-08-03T10:00:00Z".into(),
+        };
+        let err = s.finish_task(&finished).unwrap_err();
+        assert!(matches!(err, crate::error::DashboardError::TaskNotFound(_)));
+    }
+
+    #[test]
+    fn finish_task_twice_returns_conflict() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        let finished = TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:03:00Z".into(),
+        };
+        s.finish_task(&finished).unwrap();
+        let err = s.finish_task(&finished).unwrap_err();
+        assert!(matches!(err, crate::error::DashboardError::TaskConflict(_)));
+    }
+
+    #[test]
+    fn task_is_finished_reports_correctly() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        assert!(!s.task_is_finished("t1").unwrap());
+        let finished = TaskFinishedEvent {
+            task_id: "t1".into(),
+            status: TaskStatus::Success,
+            duration_secs: 10,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            mr_url: None,
+            ci_url: None,
+            summary: "ok".into(),
+            error: None,
+            finished_at: "2026-08-03T10:03:00Z".into(),
+        };
+        s.finish_task(&finished).unwrap();
+        assert!(s.task_is_finished("t1").unwrap());
+    }
+
+    #[test]
+    fn delete_task_removes_task_and_events() {
+        let s = Storage::open_in_memory().unwrap();
+        s.start_task(&sample_started("t1")).unwrap();
+        s.insert_events(
+            "t1",
+            &vec![ExecutionEvent::LlmCall {
+                iteration: 1,
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                latency_ms: 100,
+            }],
+        )
+        .unwrap();
+        s.delete_task("t1").unwrap();
+        assert!(!s.task_exists("t1").unwrap());
+        assert!(s.list_events("t1").unwrap().is_empty());
     }
 }
