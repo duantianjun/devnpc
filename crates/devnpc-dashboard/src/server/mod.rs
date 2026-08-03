@@ -16,7 +16,7 @@ use std::convert::Infallible;
 use askama::Template;
 use crate::auth::require_token;
 use crate::error::DashboardError;
-use crate::server::views::{IndexTemplate, TaskDetailTemplate};
+use crate::server::views::{IndexTemplate, RealtimeTemplate, TaskDetailTemplate};
 use crate::state::AppState;
 
 /// 嵌入静态资源 (编译期从 static/ 目录读取)
@@ -40,6 +40,7 @@ pub fn build_router(state: AppState) -> Router {
         // === 页面路由 (Phase 4) ===
         .route("/", get(index_page))
         .route("/tasks/:id", get(task_detail_page))
+        .route("/realtime", get(realtime_page))
         .route("/api/tasks", get(api::list_tasks))
         .route("/api/tasks/:id", get(api::get_task))
         .route("/api/tasks/:id/events", get(api::list_task_events))
@@ -107,6 +108,15 @@ pub async fn task_detail_page(
     let tmpl = TaskDetailTemplate {
         active_nav: "tasks".to_string(),
         task,
+    };
+    let html = tmpl.render()?;
+    Ok(Html(html))
+}
+
+/// GET /realtime - 实时监控页
+pub async fn realtime_page() -> Result<Html<String>, DashboardError> {
+    let tmpl = RealtimeTemplate {
+        active_nav: "realtime".to_string(),
     };
     let html = tmpl.render()?;
     Ok(Html(html))

@@ -1,0 +1,124 @@
+{% extends "layout.html" %}
+
+{% block title %}实时监控 - devnpc Dashboard{% endblock %}
+{% block page_title %}实时监控（SSE 推送）{% endblock %}
+
+{% block content %}
+<div class="layui-btn-container" style="margin-bottom:10px;">
+    <button class="layui-btn layui-btn-sm" id="btn-clear">清空日志</button>
+    <span class="layui-badge-rim" id="sse-status" style="margin-left:10px;">连接中...</span>
+</div>
+
+<!-- 折叠面板容器:每个 running 任务一个面板 -->
+<div class="layui-collapse" id="realtime-panel" lay-filter="realtime"></div>
+
+<!-- 空状态提示 -->
+<div id="empty-tip" style="padding:60px;text-align:center;color:#999;">
+    <i class="layui-icon layui-icon-loading-1" style="font-size:30px;"></i>
+    <p>等待运行中的任务...</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+layui.use(['layer', 'element'], function(){
+    var element = layui.element;
+    var layer = layui.layer;
+
+    var panels = {};  // task_id -> { lastUpdate, finished }
+
+    // 订阅 SSE (spec §6.1: 原生 EventSource API)
+    var source = new EventSource('/api/realtime/stream');
+
+    source.onopen = function() {
+        document.getElementById('sse-status').className = 'layui-badge layui-bg-green';
+        document.getElementById('sse-status').textContent = '已连接';
+    };
+
+    source.onmessage = function(e) {
+        var data = JSON.parse(e.data);
+        var taskId = data.task_id;
+        var eventType = data.event_type;
+        var eventPayload = data.event || {};
+        var timestamp = data.timestamp || new Date().toISOString();
+
+        // 检测任务完成事件 (event_type=task_finished)
+        var isFinished = (eventType === 'task_finished');
+
+        // 首次见到该 task_id:创建折叠面板
+        if (!panels[taskId]) {
+            document.getElementById('empty-tip').style.display = 'none';
+            var shortId = taskId.substring(0, 8);
+            var html = '<div class="layui-colla-item" data-task="' + taskId + '" id="panel-' + shortId + '">' +
+                '<h2 class="layui-colla-title">' +
+                '<i class="layui-icon layui-icon-component"></i> 任务 ' + shortId +
+                ' <span class="layui-badge layui-bg-blue" style="margin-left:8px;" id="badge-' + shortId + '">运行中</span>' +
+                '</h2>' +
+                '<div class="layui-colla-content layui-show">' +
+                '<div class="log-area" id="log-' + shortId + '"></div>' +
+                '</div></div>';
+            var wrap = document.createElement('div');
+            wrap.innerHTML = html;
+            document.getElementById('realtime-panel').appendChild(wrap.firstChild);
+            element.render('collapse');
+            panels[taskId] = { shortId: shortId, finished: false };
+        }
+
+        var info = panels[taskId];
+        var logArea = document.getElementById('log-' + info.shortId);
+
+        // 追加日志行
+        if (logArea) {
+            var detail = '';
+            if (typeof eventPayload === 'object') {
+                // 简化显示:把对象 key/value 拼接
+                detail = Object.keys(eventPayload).map(function(k){
+                    return k + '=' + JSON.stringify(eventPayload[k]);
+                }).join(' ');
+            } else {
+                detail = String(eventPayload);
+            }
+            var line = '<div class="log-line">' +
+                '<span class="log-time">' + timestamp + '</span>' +
+                '<span class="log-type">' + eventType + '</span>' +
+                '<span class="log-detail">' + detail + '</span>' +
+                '</div>';
+            logArea.insertAdjacentHTML('beforeend', line);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        // 任务完成:面板边框变色,3 秒后自动收起 (spec §6.3.3)
+        if (isFinished) {
+            info.finished = true;
+            var badge = document.getElementById('badge-' + info.shortId);
+            if (badge) {
+                badge.className = 'layui-badge layui-bg-gray';
+                badge.textContent = '已完成';
+            }
+            var panel = document.getElementById('panel-' + info.shortId);
+            if (panel) {
+                panel.style.borderLeft = '3px solid #5FB878';
+                setTimeout(function(){
+                    // 通过模拟点击标题来收起
+                    var title = panel.querySelector('.layui-colla-title');
+                    if (title) title.click();
+                }, 3000);
+            }
+        }
+    };
+
+    source.onerror = function() {
+        document.getElementById('sse-status').className = 'layui-badge';
+        document.getElementById('sse-status').textContent = '断开,重连中...';
+        // EventSource 浏览器原生自动重连,无需手动处理 (spec §6.5)
+    };
+
+    // 清空日志按钮
+    document.getElementById('btn-clear').addEventListener('click', function(){
+        document.querySelectorAll('.log-area').forEach(function(el){
+            el.innerHTML = '';
+        });
+    });
+});
+</script>
+{% endblock %}

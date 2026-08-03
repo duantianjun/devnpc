@@ -24,3 +24,10 @@ pub struct TaskDetailTemplate {
     pub active_nav: String,
     pub task: TaskRow,
 }
+
+/// 实时监控页
+#[derive(Template)]
+#[template(path = "realtime.html")]
+pub struct RealtimeTemplate {
+    pub active_nav: String,
+}
