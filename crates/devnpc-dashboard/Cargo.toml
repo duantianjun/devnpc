@@ -19,7 +19,7 @@ devnpc-core = { path = "../devnpc-core" }
 # 异步运行时
 tokio = { workspace = true }
 futures = { workspace = true }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Web 框架 (multipart 用于文件导入)
 axum = { workspace = true, features = ["multipart"] }
