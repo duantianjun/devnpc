@@ -1,144 +1,19 @@
 //! 轨迹采集器
 //!
 //! 从执行轨迹提取事件,聚合为报告数据。
+//! 纯数据类型已迁移到 devnpc-core,这里通过 re-export 保持向后兼容。
+
+// re-export core 类型 (向后兼容现有 use crate::report::collector::* 路径)
+pub use devnpc_core::report::types::{
+    CostEstimate, ReportData, TeamStepSummary, Trajectory, TrajectoryEvent,
+    TrajectoryEventSummary, TrajectorySummary,
+};
 
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
 use crate::ci::controller::CiOutcome;
-
-// ============================================================
-// 本地轨迹类型 (替代旧的 agent::loop_ 模块)
-// ============================================================
-
-/// 轨迹事件
-#[derive(Debug, Clone)]
-pub enum TrajectoryEvent {
-    /// LLM 调用
-    LlmCall { iteration: usize },
-    /// 工具调用
-    ToolCall { name: String, success: bool },
-    /// SOP 偏离
-    Deviation { step: String, unexpected: Vec<String> },
-}
-
-/// 轨迹 (本地定义)
-#[derive(Debug, Clone, Default)]
-pub struct Trajectory {
-    pub events: Vec<TrajectoryEvent>,
-}
-
-impl Trajectory {
-    pub fn new() -> Self {
-        Self { events: Vec::new() }
-    }
-
-    /// 记录 LLM 调用
-    pub fn record_llm_call(&mut self, iteration: usize) {
-        self.events.push(TrajectoryEvent::LlmCall { iteration });
-    }
-
-    /// 记录工具调用
-    pub fn record_tool_call(&mut self, name: &str, success: bool) {
-        self.events.push(TrajectoryEvent::ToolCall {
-            name: name.to_string(),
-            success,
-        });
-    }
-}
-
-/// 报告数据 (供 HTML 生成使用)
-#[derive(Debug, Clone)]
-pub struct ReportData {
-    pub status: String,
-    pub duration_secs: u64,
-    pub token_total: u64,
-    pub llm_calls: u32,
-    pub tool_calls: u32,
-    pub ci_retries: u8,
-    pub mr_url: Option<String>,
-    pub ci_url: Option<String>,
-    pub summary: String,
-    pub task_description: String,
-    pub trajectory: TrajectorySummary,
-    pub cost_estimate: CostEstimate,
-    pub mr_iid: Option<u64>,
-    pub pipeline_id: Option<u64>,
-    pub started_at: String,
-    pub finished_at: String,
-    /// Team 协作流程步骤 (仅在 Team 编排模式下填充)
-    pub team_steps: Vec<TeamStepSummary>,
-}
-
-/// Team 协作步骤摘要 (供 HTML 渲染)
-#[derive(Debug, Clone, Default)]
-pub struct TeamStepSummary {
-    /// 角色名 (pm/developer/tester)
-    pub role: String,
-    /// 输入指令
-    pub instruction: String,
-    /// Agent 输出
-    pub output: String,
-    /// 检测到的信号 (decomposed/implemented 等)
-    pub signals: Vec<String>,
-}
-
-/// 轨迹摘要 (供 HTML 渲染)
-#[derive(Debug, Clone, Default)]
-pub struct TrajectorySummary {
-    pub events: Vec<TrajectoryEventSummary>,
-}
-
-/// 轨迹事件摘要
-#[derive(Debug, Clone)]
-pub struct TrajectoryEventSummary {
-    pub kind: String,
-    pub detail: String,
-    pub success: Option<bool>,
-}
-
-/// 成本估算 (基于 token 数)
-#[derive(Debug, Clone)]
-pub struct CostEstimate {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub estimated_cost_usd: f64,
-}
-
-impl Default for CostEstimate {
-    fn default() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            estimated_cost_usd: 0.0,
-        }
-    }
-}
-
-impl Default for ReportData {
-    fn default() -> Self {
-        Self {
-            status: "unknown".into(),
-            duration_secs: 0,
-            token_total: 0,
-            llm_calls: 0,
-            tool_calls: 0,
-            ci_retries: 0,
-            mr_url: None,
-            ci_url: None,
-            summary: String::new(),
-            task_description: String::new(),
-            trajectory: TrajectorySummary::default(),
-            cost_estimate: CostEstimate::default(),
-            mr_iid: None,
-            pipeline_id: None,
-            started_at: Utc::now().to_rfc3339(),
-            finished_at: Utc::now().to_rfc3339(),
-            team_steps: Vec::new(),
-        }
-    }
-}
 
 /// 轨迹采集器
 pub struct TrajectoryCollector {

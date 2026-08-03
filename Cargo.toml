@@ -1,8 +1,5 @@
 [workspace]
-# NOTE: crates/devnpc 成员将在 Phase 1 Task 5 (移动 devnpc src) 执行后取消注释。
-# 当前仅 devnpc-core 可用,临时注释 devnpc 以使 cargo 命令可解析。
-members = ["crates/devnpc-core"]
-# members = ["crates/devnpc-core", "crates/devnpc"]
+members = ["crates/devnpc-core", "crates/devnpc"]
 resolver = "2"
 
 [workspace.package]
@@ -43,3 +40,8 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # 代码感知
 tree-sitter = "0.26"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

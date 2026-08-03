@@ -1,0 +1,99 @@
+[package]
+name = "devnpc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "基于 GitLab 的企业级研发流程 AI 智能体"
+
+[[bin]]
+name = "devnpc"
+path = "src/main.rs"
+
+[lib]
+name = "devnpc"
+path = "src/lib.rs"
+
+[features]
+default = ["deepseek", "openai", "anthropic", "gemini"]
+deepseek = ["adk-rust/deepseek"]
+openai = ["adk-rust/openai"]
+anthropic = ["adk-rust/anthropic"]
+gemini = ["adk-rust/gemini"]
+
+[dependencies]
+devnpc-core = { path = "../devnpc-core" }
+
+# 异步运行时
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Agent 框架 (adk-rust)
+adk-rust = { version = "1", features = [
+    "minimal",
+    "openai", "anthropic", "deepseek",
+    "tools",
+    "graph",
+    "mcp",
+    "mcp-http",
+    "guardrail",
+    "memory",
+    "rag",
+    "code",
+    "eval",
+] }
+
+# HTTP / GitLab API
+reqwest = { workspace = true }
+
+# Webhook 服务器
+axum = { workspace = true }
+tower = { workspace = true }
+
+# 代码感知工具 (AFT)
+tree-sitter = { workspace = true }
+tree-sitter-rust = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.24"
+tree-sitter-swift = "0.7"
+tree-sitter-kotlin-sg = "0.4"
+
+# 序列化
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# 日志与错误
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+# 工具
+uuid = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+async-trait = { workspace = true }
+
+# 长期记忆存储
+rusqlite = { workspace = true }
+
+# MCP 协议
+rmcp = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"
+tempfile = "3"
+wiremock = "0.6"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("deepseek", "openai", "anthropic", "gemini"))'] }
