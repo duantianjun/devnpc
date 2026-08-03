@@ -17,7 +17,7 @@ use askama::Template;
 use crate::auth::require_token;
 use crate::error::DashboardError;
 use crate::server::views::{
-    CostTemplate, IndexTemplate, RealtimeTemplate, TaskDetailTemplate, TrendsTemplate,
+    CiTemplate, CostTemplate, IndexTemplate, RealtimeTemplate, TaskDetailTemplate, TrendsTemplate,
 };
 use crate::state::AppState;
 
@@ -45,6 +45,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/realtime", get(realtime_page))
         .route("/trends", get(trends_page))
         .route("/cost", get(cost_page))
+        .route("/ci", get(ci_page))
         .route("/api/tasks", get(api::list_tasks))
         .route("/api/tasks/:id", get(api::get_task))
         .route("/api/tasks/:id/events", get(api::list_task_events))
@@ -139,6 +140,15 @@ pub async fn trends_page() -> Result<Html<String>, DashboardError> {
 pub async fn cost_page() -> Result<Html<String>, DashboardError> {
     let tmpl = CostTemplate {
         active_nav: "cost".to_string(),
+    };
+    let html = tmpl.render()?;
+    Ok(Html(html))
+}
+
+/// GET /ci - CI 自愈统计页
+pub async fn ci_page() -> Result<Html<String>, DashboardError> {
+    let tmpl = CiTemplate {
+        active_nav: "ci".to_string(),
     };
     let html = tmpl.render()?;
     Ok(Html(html))

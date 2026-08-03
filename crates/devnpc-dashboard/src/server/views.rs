@@ -45,3 +45,10 @@ pub struct TrendsTemplate {
 pub struct CostTemplate {
     pub active_nav: String,
 }
+
+/// CI 自愈统计页
+#[derive(Template)]
+#[template(path = "ci.html")]
+pub struct CiTemplate {
+    pub active_nav: String,
+}

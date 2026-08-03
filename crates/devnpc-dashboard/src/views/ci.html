@@ -1,0 +1,142 @@
+{% extends "layout.html" %}
+
+{% block title %}CI 自愈统计 - devnpc Dashboard{% endblock %}
+{% block page_title %}CI 自愈统计{% endblock %}
+
+{% block content %}
+<!-- 概览卡片:总失败/自动修复/成功率/平均重试 (spec §6.3.6) -->
+<div class="layui-row layui-col-space15">
+    <div class="layui-col-md3">
+        <div class="layui-card">
+            <div class="layui-card-header">总失败任务</div>
+            <div class="layui-card-body">
+                <span class="stat-card-value" style="color:#FF5722;" id="stat-total-failed">-</span>
+            </div>
+        </div>
+    </div>
+    <div class="layui-col-md3">
+        <div class="layui-card">
+            <div class="layui-card-header">自动修复</div>
+            <div class="layui-card-body">
+                <span class="stat-card-value" style="color:#5FB878;" id="stat-auto-fixed">-</span>
+            </div>
+        </div>
+    </div>
+    <div class="layui-col-md3">
+        <div class="layui-card">
+            <div class="layui-card-header">修复成功率</div>
+            <div class="layui-card-body">
+                <span class="stat-card-value" style="color:#1E9FFF;" id="stat-success-rate">-</span>%
+            </div>
+        </div>
+    </div>
+    <div class="layui-col-md3">
+        <div class="layui-card">
+            <div class="layui-card-header">平均重试次数</div>
+            <div class="layui-card-body">
+                <span class="stat-card-value" style="color:#FFB800;" id="stat-avg-retries">-</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ECharts 柱状图:重试次数分布 (从 failed_tasks 的 ci_retries 聚合) -->
+<div class="layui-row layui-col-space15">
+    <div class="layui-col-md12">
+        <div class="layui-card">
+            <div class="layui-card-header">重试次数分布</div>
+            <div class="layui-card-body">
+                <div id="chart-retry" style="height:300px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 失败任务列表 -->
+<div class="layui-row layui-col-space15">
+    <div class="layui-col-md12">
+        <div class="layui-card">
+            <div class="layui-card-header">失败任务列表</div>
+            <div class="layui-card-body">
+                <table id="failed-table" lay-filter="failed"></table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/echarts.min.js"></script>
+<script>
+layui.use(['table'], function(){
+    var table = layui.table;
+    var chart = echarts.init(document.getElementById('chart-retry'));
+
+    // 加载 CI 自愈统计 (spec §5.2: GET /api/stats/ci)
+    // 响应字段: { total_failed, auto_healed, heal_rate, avg_retries, failed_tasks }
+    fetch('/api/stats/ci')
+        .then(function(r){
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(data){
+            // 概览卡片数值
+            document.getElementById('stat-total-failed').textContent = data.total_failed || 0;
+            document.getElementById('stat-auto-fixed').textContent = data.auto_healed || 0;
+            document.getElementById('stat-success-rate').textContent =
+                Number(data.heal_rate || 0).toFixed(1);
+            document.getElementById('stat-avg-retries').textContent =
+                Number(data.avg_retries || 0).toFixed(1);
+
+            // 重试分布柱状图:从 failed_tasks 的 ci_retries 字段聚合
+            var failedTasks = data.failed_tasks || [];
+            var bucket = {};
+            failedTasks.forEach(function(t){
+                var r = t.ci_retries || 0;
+                bucket[r] = (bucket[r] || 0) + 1;
+            });
+            var attempts = Object.keys(bucket).map(Number).sort(function(a, b){ return a - b; });
+            chart.setOption({
+                tooltip: {trigger: 'axis'},
+                xAxis: {
+                    type: 'category',
+                    data: attempts.map(function(a){ return '重试 ' + a + ' 次'; })
+                },
+                yAxis: {type: 'value'},
+                series: [{
+                    name: '任务数',
+                    type: 'bar',
+                    data: attempts.map(function(a){ return bucket[a]; }),
+                    itemStyle: {color: '#1E9FFF'}
+                }]
+            });
+
+            // 失败任务表格
+            table.render({
+                elem: '#failed-table',
+                data: failedTasks,
+                page: true,
+                limit: 20,
+                cols: [[
+                    {field: 'task_id', title: '任务 ID', width: 140, templet: function(d){
+                        return '<a href="/tasks/' + d.task_id + '">' + d.task_id.substring(0, 8) + '</a>';
+                    }},
+                    {field: 'project', title: '项目', width: 200},
+                    {field: 'task_description', title: '任务描述'},
+                    {field: 'ci_retries', title: '重试次数', width: 100},
+                    {field: 'error', title: '错误', templet: function(d){
+                        return d.error ? '<span style="color:red;">' + d.error + '</span>' : '-';
+                    }}
+                ]]
+            });
+        })
+        .catch(function(err){
+            layui.layer.msg('加载 CI 统计失败: ' + err.message, {icon: 2});
+        });
+
+    window.addEventListener('resize', function(){
+        chart.resize();
+    });
+});
+</script>
+{% endblock %}
