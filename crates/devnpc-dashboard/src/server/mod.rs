@@ -6,14 +6,17 @@ pub mod views;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::from_fn_with_state;
-use axum::response::{IntoResponse, Response, Sse};
+use axum::response::{Html, IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::Router;
 use futures::{Stream, StreamExt};
 use rust_embed::RustEmbed;
 use std::convert::Infallible;
 
+use askama::Template;
 use crate::auth::require_token;
+use crate::error::DashboardError;
+use crate::server::views::IndexTemplate;
 use crate::state::AppState;
 
 /// 嵌入静态资源 (编译期从 static/ 目录读取)
@@ -34,6 +37,8 @@ pub fn build_router(state: AppState) -> Router {
 
     // 辅助 API (无鉴权)
     let public = Router::new()
+        // === 页面路由 (Phase 4) ===
+        .route("/", get(index_page))
         .route("/api/tasks", get(api::list_tasks))
         .route("/api/tasks/:id", get(api::get_task))
         .route("/api/tasks/:id/events", get(api::list_task_events))
@@ -74,6 +79,19 @@ pub async fn static_handler(Path(path): Path<String>) -> Response {
         }
         None => (StatusCode::NOT_FOUND, "未找到资源").into_response(),
     }
+}
+
+// ============================================================
+// 页面 handler (Phase 4: askama 服务端渲染)
+// ============================================================
+
+/// GET / - 任务列表页
+pub async fn index_page() -> Result<Html<String>, DashboardError> {
+    let tmpl = IndexTemplate {
+        active_nav: "tasks".to_string(),
+    };
+    let html = tmpl.render()?;
+    Ok(Html(html))
 }
 
 #[cfg(test)]

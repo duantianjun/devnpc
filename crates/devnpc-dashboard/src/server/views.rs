@@ -4,3 +4,13 @@
 //! 模板文件位于 `src/views/`,通过 crate 根目录的 `askama.toml` 配置
 //! (`dirs = ["src/views"]`)。子模板通过 `{% extends "layout.html" %}`
 //! 继承公共布局,布局中通过 `active_nav` 字段高亮当前导航项。
+
+use askama::Template;
+
+/// 任务列表页
+#[derive(Template)]
+#[template(path = "index.html")]
+pub struct IndexTemplate {
+    /// 当前激活的导航项标识: tasks/realtime/trends/cost/ci/sop
+    pub active_nav: String,
+}

@@ -1,0 +1,114 @@
+{% extends "layout.html" %}
+
+{% block title %}任务列表 - devnpc Dashboard{% endblock %}
+{% block page_title %}任务列表（最近 100 条）{% endblock %}
+
+{% block content %}
+<!-- 工具栏:导入按钮 + 手动刷新 -->
+<div class="layui-btn-container" style="margin-bottom: 10px;">
+    <button class="layui-btn" id="btn-import">
+        <i class="layui-icon layui-icon-upload"></i> 导入事件文件
+    </button>
+    <button class="layui-btn layui-btn-primary" id="btn-refresh">
+        <i class="layui-icon layui-icon-refresh"></i> 刷新
+    </button>
+    <span class="layui-badge-rim" id="running-tip" style="display:none;margin-left:10px;">
+        有运行中任务,5 秒后自动刷新
+    </span>
+</div>
+
+<!-- 任务表格:AJAX 数据源 /api/tasks -->
+<table id="tasks-table" lay-filter="tasks"></table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+layui.use(['table', 'upload', 'layer'], function(){
+    var table = layui.table;
+    var upload = layui.upload;
+    var layer = layui.layer;
+
+    // 渲染任务表格
+    table.render({
+        elem: '#tasks-table',
+        url: '/api/tasks',
+        method: 'get',
+        page: true,
+        limit: 20,
+        limits: [20, 50, 100],
+        cols: [[
+            {field: 'status', title: '状态', width: 110, templet: function(d){
+                // 状态 badge:成功=绿/失败=红/运行=蓝/超时=橙/CI 失败=橙
+                var map = {
+                    'success':    '<span class="layui-badge layui-bg-green">成功</span>',
+                    'failed':     '<span class="layui-badge">失败</span>',
+                    'running':    '<span class="layui-badge layui-bg-blue">运行中</span>',
+                    'timeout':    '<span class="layui-badge layui-bg-orange">超时</span>',
+                    'ci_failed':  '<span class="layui-badge layui-bg-orange">CI 失败</span>'
+                };
+                return map[d.status] || d.status;
+            }},
+            {field: 'project', title: '项目', width: 200},
+            {field: 'task_description', title: '任务描述'},
+            {field: 'duration_secs', title: '耗时(秒)', width: 110, sort: true},
+            {field: 'total_tokens', title: 'Token', width: 120, sort: true},
+            {field: 'estimated_cost_usd', title: '成本($)', width: 110, sort: true, templet: function(d){
+                return Number(d.estimated_cost_usd || 0).toFixed(4);
+            }},
+            {field: 'started_at', title: '开始时间', width: 180}
+        ]],
+        // 渲染完成后检查是否有 running 任务
+        done: function(res) {
+            var hasRunning = (res.data || []).some(function(t){
+                return t.status === 'running';
+            });
+            var tip = document.getElementById('running-tip');
+            if (hasRunning) {
+                tip.style.display = 'inline-block';
+                // 5 秒自动刷新 (仅当有 running 任务)
+                setTimeout(function(){
+                    table.reload('tasks-table');
+                }, 5000);
+            } else {
+                tip.style.display = 'none';
+            }
+        }
+    });
+
+    // 点击行跳转任务详情
+    table.on('row(tasks)', function(obj){
+        window.location.href = '/tasks/' + obj.data.task_id;
+    });
+
+    // 导入事件文件:layui-upload 文件上传
+    upload.render({
+        elem: '#btn-import',
+        url: '/api/events/import',
+        accept: 'file',
+        exts: 'jsonl',
+        headers: {
+            // 导入接口需要 token,实际部署时通过 URL 参数 ?token=xxx 传递
+        },
+        done: function(res){
+            // res 是服务端返回的 JSON
+            if (res.imported) {
+                layer.msg('导入成功,共 ' + res.events_count + ' 条事件', {icon: 1});
+                table.reload('tasks-table');
+            } else if (res.skipped) {
+                layer.msg('任务已存在,跳过导入', {icon: 0});
+            } else {
+                layer.msg('导入失败: ' + (res.error || '未知错误'), {icon: 2});
+            }
+        },
+        error: function(){
+            layer.msg('上传失败,请检查网络或文件格式(.jsonl)', {icon: 2});
+        }
+    });
+
+    // 手动刷新按钮
+    document.getElementById('btn-refresh').addEventListener('click', function(){
+        table.reload('tasks-table');
+    });
+});
+</script>
+{% endblock %}
