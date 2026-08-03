@@ -31,3 +31,10 @@ pub struct TaskDetailTemplate {
 pub struct RealtimeTemplate {
     pub active_nav: String,
 }
+
+/// 趋势统计页
+#[derive(Template)]
+#[template(path = "trends.html")]
+pub struct TrendsTemplate {
+    pub active_nav: String,
+}

@@ -16,7 +16,9 @@ use std::convert::Infallible;
 use askama::Template;
 use crate::auth::require_token;
 use crate::error::DashboardError;
-use crate::server::views::{IndexTemplate, RealtimeTemplate, TaskDetailTemplate};
+use crate::server::views::{
+    IndexTemplate, RealtimeTemplate, TaskDetailTemplate, TrendsTemplate,
+};
 use crate::state::AppState;
 
 /// 嵌入静态资源 (编译期从 static/ 目录读取)
@@ -41,6 +43,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(index_page))
         .route("/tasks/:id", get(task_detail_page))
         .route("/realtime", get(realtime_page))
+        .route("/trends", get(trends_page))
         .route("/api/tasks", get(api::list_tasks))
         .route("/api/tasks/:id", get(api::get_task))
         .route("/api/tasks/:id/events", get(api::list_task_events))
@@ -117,6 +120,15 @@ pub async fn task_detail_page(
 pub async fn realtime_page() -> Result<Html<String>, DashboardError> {
     let tmpl = RealtimeTemplate {
         active_nav: "realtime".to_string(),
+    };
+    let html = tmpl.render()?;
+    Ok(Html(html))
+}
+
+/// GET /trends - 趋势统计页
+pub async fn trends_page() -> Result<Html<String>, DashboardError> {
+    let tmpl = TrendsTemplate {
+        active_nav: "trends".to_string(),
     };
     let html = tmpl.render()?;
     Ok(Html(html))
