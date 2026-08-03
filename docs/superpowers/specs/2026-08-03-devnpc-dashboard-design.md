@@ -35,6 +35,7 @@
 | 9 | 鉴权 | 推送 token + 查看免鉴权 | 推送防伪造，查看开放 |
 | 10 | devnpc 触发 | 配置驱动（.env） | 符合项目约定，dashboard 可选 |
 | 11 | 架构方案 | B（workspace 拆分） | 共享 core crate，dashboard 精简 |
+| 12 | 兜底机制 | 本地 .jsonl 事件文件 + dashboard 导入 | 推送失败时事后可导入，文件独立于 dashboard 配置 |
 
 ---
 
@@ -178,6 +179,7 @@ pub struct TaskFinishedEvent {
 | POST | `/api/events/start` | `X-Devnpc-Token: xxx` | `TaskStartedEvent` | 任务启动 |
 | POST | `/api/events/batch` | `X-Devnpc-Token: xxx` | `{ task_id, events: [ExecutionEvent...] }` | 批量执行事件 |
 | POST | `/api/events/finish` | `X-Devnpc-Token: xxx` | `TaskFinishedEvent` | 任务结束 |
+| POST | `/api/events/import` | `X-Devnpc-Token: xxx` | `multipart/form-data` (上传 .jsonl 文件) | 导入本地事件文件(兜底) |
 
 ### 3.3 批量推送策略
 
@@ -188,7 +190,42 @@ pub struct TaskFinishedEvent {
   - channel 关闭（任务结束 flush）
 - 推送失败时**指数退避重试**（1s/2s/4s/8s/16s，最多 5 次），仍失败则丢弃并记 tracing::warn
 
-### 3.4 SQLite Schema
+### 3.4 本地事件文件（兜底机制）
+
+实时推送可能因网络/dashboard 不可达而失败，devnpc 在本地同时保存一份完整事件文件，可在事后导入 dashboard 查看。
+
+**文件格式**：JSON Lines（.jsonl），每行一个事件，流式追加写入，进程崩溃也不丢已写入事件。
+
+**文件位置**：与现有 HTML 报告同目录（artifact 目录），文件名 `{task_id}.jsonl`
+
+**文件内容**（按行顺序）：
+```jsonl
+{"type":"task_started","task_id":"a8c6...","project":"proj-a",...}
+{"type":"execution","task_id":"a8c6...","event":{"LlmCall":{"iteration":1,...}}}
+{"type":"execution","task_id":"a8c6...","event":{"ToolCall":{"name":"read_file",...}}}
+{"type":"execution","task_id":"a8c6...","event":{"SopStep":{"step":"analyze",...}}}
+{"type":"task_finished","task_id":"a8c6...","status":"Success",...}
+```
+
+**写入时机**：`EventSender` 内部同时做两件事（并行，互不影响）：
+1. 写入 mpsc channel → 后台批量 POST 推送（实时）
+2. 追加写入本地 `.jsonl` 文件（兜底）
+
+**导入接口**（`POST /api/events/import`）：
+- 接收 multipart 文件上传（.jsonl）
+- 逐行解析 JSON，按顺序写入 SQLite
+- **幂等处理**：基于 task_id 判断
+  - 若 task_id 已存在且状态为 running（仅 start 无 finish）：覆盖该任务及其事件
+  - 若 task_id 已存在且已 finish：跳过，返回 409 Conflict + 提示"任务已存在"
+  - 若 task_id 不存在：正常导入
+- 返回：`{ imported: true, task_id: "xxx", events_count: N }` 或冲突信息
+
+**导入触发方式**：
+- 任务列表页（`/`）顶部增加"导入事件文件"按钮
+- 点击弹出文件选择框，选择 .jsonl 文件上传
+- 上传成功后刷新任务列表
+
+### 3.5 SQLite Schema
 
 ```sql
 -- 任务主表
@@ -260,6 +297,7 @@ pub struct DashboardConfig {
     pub token: String,             // DEVNPC_DASHBOARD_TOKEN
     pub batch_size: usize,         // 默认 20
     pub batch_interval_secs: u64,  // 默认 3
+    pub local_event_log: bool,     // 默认 true,即使 dashboard 未启用也保存本地事件文件
 }
 ```
 
@@ -267,15 +305,38 @@ pub struct DashboardConfig {
 ```
 DEVNPC_DASHBOARD_URL=http://dashboard-host:8080
 DEVNPC_DASHBOARD_TOKEN=your-secret-token
+# local_event_log 默认 true,无需配置;设为 false 可关闭本地事件文件
+DEVNPC_DASHBOARD_LOCAL_LOG=false
 ```
 
-**降级策略**：`enabled=false`（未配置 URL）时，`Trajectory::record_*` 行为退化为现状（只写内存 Vec），不影响现有测试。
+**降级策略**：`enabled=false`（未配置 URL）时，不创建 `EventSender`，不推送事件，`Trajectory::record_*` 行为退化为现状（只写内存 Vec），不影响现有测试。
 
-### 4.2 事件推送器
+**本地文件独立于 dashboard 推送**：即使 `enabled=false`，只要 `local_event_log=true`（默认），devnpc 仍会保存本地 `.jsonl` 事件文件作为任务记录，方便事后导入 dashboard。文件写入由独立的 `LocalEventLogger` 组件负责，不依赖 `EventSender`。
 
-新增 `src/report/sender.rs`（位于 devnpc crate，依赖 HTTP client）：
+### 4.2 事件推送器与本地事件记录器
+
+新增 `src/report/sender.rs`（位于 devnpc crate），包含两个独立组件：
 
 ```rust
+/// 本地事件记录器 (兜底机制,独立于推送)
+/// 即使 dashboard 未配置,只要 local_event_log=true 就会创建
+pub struct LocalEventLogger {
+    task_id: String,
+    writer: Arc<Mutex<Option<BufWriter<File>>>>,
+}
+
+impl LocalEventLogger {
+    /// 创建本地 .jsonl 文件 (在 artifact 目录),写入 task_started 行
+    pub fn new(task_id: &str, started: &TaskStartedEvent, artifact_dir: &Path) -> Self { ... }
+
+    /// 追加一行 execution 事件
+    pub fn log_event(&self, event: &ExecutionEvent) { ... }
+
+    /// 写入 task_finished 行并关闭文件
+    pub fn finish(&self, finished: &TaskFinishedEvent) { ... }
+}
+
+/// 事件推送器 (仅 dashboard.enabled=true 时创建)
 pub struct EventSender {
     tx: mpsc::Sender<ExecutionEvent>,
     task_id: String,
@@ -294,25 +355,49 @@ impl EventSender {
 }
 ```
 
+**Trajectory 持有三个可选组件**：
+- `events: Vec<TrajectoryEvent>` — 内存事件列表（现状，始终存在）
+- `local_logger: Option<LocalEventLogger>` — 本地文件记录（`local_event_log=true` 时存在）
+- `sender: Option<EventSender>` — 实时推送（`enabled=true` 时存在）
+
+**record_* 方法的行为**：
+```rust
+pub fn record_llm_call(&mut self, iteration: usize) {
+    let event = ExecutionEvent::LlmCall { ... };
+    self.events.push(TrajectoryEvent::LlmCall { iteration });
+    if let Some(logger) = &self.local_logger { logger.log_event(&event); }
+    if let Some(sender) = &self.sender { sender.send(event); }
+}
+```
+
+**本地文件写入要点**：
+- 文件创建时机：`LocalEventLogger::new()` 时立即创建，先写入 `task_started` 行
+- 每次 `log_event()` 追加一行，带 `BufWriter` 但每次 `flush()` 保证落盘（事件量小，性能无影响）
+- `finish()` 写入 `task_finished` 行后关闭文件
+- 文件写入失败：tracing::warn 记录，不影响推送和主任务（文件只是兜底）
+
 ### 4.3 Trajectory 改造
 
 ```rust
 pub struct Trajectory {
     pub events: Vec<TrajectoryEvent>,
-    sender: Option<EventSender>,    // None 时为现状行为
+    local_logger: Option<LocalEventLogger>,  // 本地文件记录
+    sender: Option<EventSender>,             // 实时推送
     task_id: String,
 }
 
 impl Trajectory {
-    pub fn with_sender(sender: EventSender) -> Self { ... }
+    /// 现状构造 (无日志无推送,兼容现有测试)
+    pub fn new() -> Self { ... }
 
-    pub fn record_llm_call(&mut self, iteration: usize) {
-        self.events.push(TrajectoryEvent::LlmCall { iteration });
-        if let Some(s) = &self.sender {
-            s.send(ExecutionEvent::LlmCall { ... });
-        }
-    }
-    // record_tool_call / record_deviation 同理
+    /// 带本地日志和推送的构造
+    pub fn with_logging(
+        task_id: String,
+        local_logger: Option<LocalEventLogger>,
+        sender: Option<EventSender>,
+    ) -> Self { ... }
+
+    // record_* 方法见 4.2 末尾示例
 }
 ```
 
@@ -320,9 +405,13 @@ impl Trajectory {
 
 `main.rs` 的 `run()` 改造：
 
-1. **任务启动时**：若 `config.dashboard.enabled`，生成 `task_id = Uuid::new_v4()`，创建 `EventSender`，POST `/api/events/start`
-2. **执行过程中**：`Trajectory` 用 `with_sender()` 构造，所有 `record_*` 自动推送
-3. **任务结束时**：`build_report()` 后，POST `/api/events/finish`
+1. **任务启动时**：生成 `task_id = Uuid::new_v4()`
+   - 若 `config.dashboard.local_event_log`：创建 `LocalEventLogger`，写入 `task_started` 行
+   - 若 `config.dashboard.enabled`：创建 `EventSender`，POST `/api/events/start`
+2. **执行过程中**：`Trajectory::with_logging()` 构造，所有 `record_*` 自动写本地文件 + 推送
+3. **任务结束时**：`build_report()` 后
+   - `local_logger.finish()` 写入 `task_finished` 行
+   - `sender.finish()` POST `/api/events/finish`
 
 ### 4.5 影响面
 
@@ -374,6 +463,7 @@ struct Cli {
 | POST | `/api/events/start` | token | 创建任务记录，状态=running，加入实时缓冲 |
 | POST | `/api/events/batch` | token | 批量写入 events 表，更新实时缓冲，SSE 广播 |
 | POST | `/api/events/finish` | token | 更新任务状态/汇总字段，写入 sop_deviations |
+| POST | `/api/events/import` | token | 导入本地 .jsonl 事件文件（multipart 上传，幂等处理） |
 | GET | `/` | 无 | 任务列表（分页，最近 100 条） |
 | GET | `/tasks/:id` | 无 | 任务详情（时间线 + 事件列表） |
 | GET | `/realtime` | 无 | 实时监控（SSE 推送当前 running 任务事件） |
@@ -439,6 +529,18 @@ impl Storage {
     pub fn cost_breakdown(&self, group_by: &str) -> Result<Vec<CostBucket>>;
     pub fn ci_stats(&self) -> Result<CiStats>;
     pub fn sop_stats(&self) -> Result<Vec<SopDeviationRow>>;
+
+    // 导入相关
+    pub fn task_exists(&self, task_id: &str) -> Result<bool>;
+    pub fn task_is_finished(&self, task_id: &str) -> Result<bool>;
+    pub fn delete_task(&self, task_id: &str) -> Result<()>;  // 覆盖导入时先删除
+    pub fn import_from_jsonl(&self, content: &str) -> Result<ImportResult>;
+}
+
+pub struct ImportResult {
+    pub task_id: String,
+    pub events_count: usize,
+    pub skipped: bool,        // true=因已 finish 而跳过
 }
 ```
 
@@ -472,6 +574,7 @@ impl Storage {
 - 运行中任务行 5 秒自动刷新
 - 状态用 LayUI badge：成功=绿/失败=红/运行=蓝/超时=橙
 - 点击行跳转 `/tasks/:id`
+- 顶部工具栏增加"导入事件文件"按钮：点击弹出 `layui-upload` 文件选择框，上传 .jsonl 到 `/api/events/import`，成功后刷新列表并提示"导入成功 N 条事件"
 
 #### 2. 任务详情 `/tasks/:id`
 - 任务元信息卡片（状态/耗时/Token/成本/项目/MR/CI）
@@ -532,9 +635,11 @@ impl Storage {
 | `EventSender::send` channel 满 | 丢弃事件，tracing::warn，记录丢弃计数 |
 | 后台批量 POST 失败 | 指数退避重试（1s/2s/4s/8s/16s，5 次），仍失败则丢弃该批，tracing::warn |
 | `EventSender::finish` 失败 | 重试 3 次，失败则 tracing::warn，**不影响 HTML 报告发布** |
-| `Config::load` 时 dashboard 配置非法 | tracing::warn 并降级为 `enabled=false` |
+| `LocalEventLogger` 文件创建/写入失败 | tracing::warn 记录，后续事件跳过文件写入，**不影响推送和主任务** |
+| `LocalEventLogger::finish` 失败 | tracing::warn 记录，**不影响 HTML 报告发布和推送** |
+| `Config::load` 时 dashboard 配置非法 | tracing::warn 并降级为 `enabled=false`（推送关闭），`local_event_log` 保持默认 true |
 
-**核心原则**：dashboard 推送是"尽力而为"，绝不能让推送失败影响 devnpc 主任务执行。
+**核心原则**：dashboard 推送和本地文件记录都是"尽力而为"，绝不能让它们失败影响 devnpc 主任务执行。本地 .jsonl 文件作为兜底，即使推送全部失败，事后仍可导入。
 
 ### 7.2 dashboard 侧
 
@@ -546,6 +651,10 @@ impl Storage {
 | POST `/api/events/batch` task_id 不存在 | 返回 404，丢弃事件 |
 | POST `/api/events/finish` task_id 不存在 | 返回 404 |
 | POST `/api/events/finish` task_id 已 finish | 返回 409 Conflict |
+| POST `/api/events/import` 文件非 .jsonl 或格式错误 | 返回 400 Bad Request + 错误行号 |
+| POST `/api/events/import` task_id 已 finish | 返回 409 Conflict + "任务已存在，跳过导入" |
+| POST `/api/events/import` task_id 存在但未 finish | 覆盖导入（先删除再写入），返回 200 |
+| POST `/api/events/import` 文件过大（>50MB） | 返回 413 Payload Too Large |
 | Token 校验失败 | 返回 401 |
 | SQLite 写入失败（磁盘满等） | 返回 500，记录 tracing::error |
 | SSE 订阅者 channel 满（消费慢） | 丢弃该订阅者的旧事件，保持连接 |
@@ -585,6 +694,9 @@ pub enum DashboardError {
     #[error("任务状态冲突: {0}")]
     TaskConflict(String),
 
+    #[error("导入文件格式错误: {0}")]
+    ImportFormat(String),
+
     #[error("模板渲染错误: {0}")]
     Template(#[from] askama::Error),
 
@@ -604,20 +716,27 @@ pub enum DashboardError {
 - `collector.rs`：现有 `Trajectory`/`ReportData` 测试迁移
 - `error.rs`：错误类型 Display 一致性
 
-**devnpc crate**（约 30 个新增测试）：
+**devnpc crate**（约 40 个新增测试）：
 - `EventSender` 测试：
   - channel 满时丢弃行为
   - 后台 task 批量触发条件（数量阈值/时间阈值/flush）
   - 重试逻辑（mock HTTP server）
   - 降级行为（dashboard.enabled=false 时不推送）
-- `Trajectory::with_sender` 测试：record 方法同时写内存和推送
+- `LocalEventLogger` 测试：
+  - 文件创建并写入 task_started 行
+  - log_event 追加 execution 行
+  - finish 写入 task_finished 行并关闭
+  - 文件写入失败时降级（不 panic）
+  - 生成的 .jsonl 文件可被 dashboard 导入解析
+- `Trajectory::with_logging` 测试：record 方法同时写内存 + 本地文件 + 推送
 - 现有 350 个测试：`use` 路径调整后全部通过
 
-**devnpc-dashboard crate**（约 40 个测试）：
+**devnpc-dashboard crate**（约 50 个测试）：
 - `storage/queries.rs`：CRUD 全覆盖、聚合查询、重复 task_id 处理、分页/过滤
+- `storage/import.rs`：JSONL 解析、幂等导入、覆盖导入、格式错误处理、大文件拒绝
 - `realtime/`：环形缓冲容量限制、订阅/取消订阅、broadcast 推送
 - `auth.rs`：token 校验中间件
-- `server/routes.rs` + `api.rs`：axum::test 服务端集成测试
+- `server/routes.rs` + `api.rs`：axum::test 服务端集成测试（含 import 端点）
 
 ### 8.2 集成测试
 
@@ -635,6 +754,13 @@ pub enum DashboardError {
 2. 推送事件
 3. 验证 stream 收到事件
 
+**导入流程测试**（`devnpc-dashboard/tests/import.rs`）：
+1. 构造一个本地 .jsonl 文件（task_started + 多个 execution + task_finished）
+2. POST `/api/events/import` 上传
+3. 验证 `GET /api/tasks/:id` 返回导入的数据
+4. 再次上传同一文件，验证幂等跳过（409 Conflict）
+5. 上传格式错误的文件，验证 400 Bad Request
+
 ### 8.3 测试工具
 
 - HTTP mock：`wiremock`（devnpc 已有 dev-dependency）
@@ -646,9 +772,9 @@ pub enum DashboardError {
 | crate | 现有测试 | 新增测试 | 总计 |
 |-------|----------|----------|------|
 | devnpc-core | ~10（从 devnpc 迁移） | ~10 | ~20 |
-| devnpc | ~340 | ~30 | ~370 |
-| devnpc-dashboard | 0 | ~40 | ~40 |
-| **合计** | ~350 | ~80 | **~430** |
+| devnpc | ~340 | ~40 | ~380 |
+| devnpc-dashboard | 0 | ~50 | ~50 |
+| **合计** | ~350 | ~100 | **~450** |
 
 ---
 
@@ -673,7 +799,7 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }  # 已有
 ### devnpc-dashboard（新增 crate）
 ```
 devnpc-core = { path = "../devnpc-core" }
-axum = "0.7"                    # 已有(在根 Cargo.toml,移到 dashboard)
+axum = { version = "0.7", features = ["multipart"] }  # multipart 用于文件导入
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.32", features = ["bundled"] }  # 已有
 serde = { version = "1", features = ["derive"] }
@@ -701,11 +827,12 @@ tower = { version = "0.5", features = ["util"] }
 ## 十、成功标准
 
 1. **功能完整**：7 个视图模块全部可用，实时监控 SSE 推送正常
-2. **向后兼容**：未配置 `DEVNPC_DASHBOARD_URL` 时，devnpc 行为与现状完全一致
-3. **测试通过**：~430 个测试全部通过（含 80 个新增）
-4. **零外部依赖**：dashboard 单二进制部署，仅需 SQLite 文件存储
-5. **降级可靠**：dashboard 不可达时 devnpc 任务不受影响
-6. **CI 友好**：devnpc 侧零 CI 配置改动（.env 驱动）
+2. **向后兼容**：未配置 `DEVNPC_DASHBOARD_URL` 时，devnpc 任务执行行为与现状完全一致
+3. **本地兜底**：即使 dashboard 不可达，devnpc 仍生成本地 .jsonl 事件文件，可通过 dashboard 导入页面事后查看
+4. **测试通过**：~450 个测试全部通过（含 100 个新增）
+5. **零外部依赖**：dashboard 单二进制部署，仅需 SQLite 文件存储
+6. **降级可靠**：dashboard 推送失败和本地文件写入失败均不影响 devnpc 主任务执行
+7. **CI 友好**：devnpc 侧零 CI 配置改动（.env 驱动）
 
 ---
 
@@ -713,10 +840,10 @@ tower = { version = "0.5", features = ["util"] }
 
 1. **Workspace 拆分**：建立三 crate 结构，迁移 report/error 到 core，现有测试通过
 2. **事件协议**：在 core 定义 event_schema.rs 类型
-3. **devnpc 侧改造**：DashboardConfig + EventSender + Trajectory 改造 + main.rs 接入
-4. **dashboard 存储**：SQLite schema + queries CRUD + 聚合查询
-5. **dashboard 服务端**：axum 路由 + 推送 API + 鉴权 + RealtimeHub
+3. **devnpc 侧改造**：DashboardConfig + LocalEventLogger + EventSender + Trajectory 改造 + main.rs 接入
+4. **dashboard 存储**：SQLite schema + queries CRUD + 聚合查询 + JSONL 导入解析
+5. **dashboard 服务端**：axum 路由 + 推送 API + 导入 API + 鉴权 + RealtimeHub
 6. **dashboard 视图**：askama 模板 + 7 个页面 handler + 静态资源嵌入
-7. **前端交互**：LayUI 集成 + AJAX + SSE 订阅 + 图表渲染
-8. **测试补全**：单元测试 + 集成测试 + E2E
-9. **文档与示例**：.env.example 更新 + dashboard 启动说明
+7. **前端交互**：LayUI 集成 + AJAX + SSE 订阅 + 图表渲染 + 导入按钮
+8. **测试补全**：单元测试 + 集成测试 + E2E + 导入测试
+9. **文档与示例**：.env.example 更新 + dashboard 启动说明 + .jsonl 格式说明
