@@ -131,6 +131,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_serves_dashboard_css_with_text_css_mime() {
+        // dashboard.css 由 Phase 4 Task 1 创建,验证 rust-embed 嵌入生效
+        let app = build_router(make_state());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/static/css/dashboard.css")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert_eq!(ct, "text/css");
+    }
+
+    #[tokio::test]
     async fn full_push_flow_via_router() {
         let state = make_state();
         let app = build_router(state.clone());
