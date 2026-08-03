@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 
 use devnpc_core::report::event_schema::{
-    ExecutionEvent, TaskFinishedEvent, TaskStartedEvent,
+    ExecutionEvent, ImportResult, TaskFinishedEvent, TaskStartedEvent,
 };
 
 use crate::error::Result;
@@ -612,6 +612,79 @@ impl Storage {
         Ok(rows)
     }
 
+    /// 从 JSONL 内容导入任务 (幂等: 已 finish 跳过, 未 finish 覆盖)
+    pub fn import_from_jsonl(&self, content: &str) -> Result<ImportResult> {
+        use devnpc_core::report::event_schema::EventLogEntry;
+
+        // 先解析全部行
+        let mut entries: Vec<EventLogEntry> = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let entry: EventLogEntry = serde_json::from_str(line).map_err(|e| {
+                crate::error::DashboardError::ImportFormat(format!("第 {} 行解析失败: {}", i + 1, e))
+            })?;
+            entries.push(entry);
+        }
+        if entries.is_empty() {
+            return Err(crate::error::DashboardError::ImportFormat(
+                "文件为空".into(),
+            ));
+        }
+        // 第一行必须是 TaskStarted
+        let task_id = match &entries[0] {
+            EventLogEntry::TaskStarted { data, .. } => data.task_id.clone(),
+            _ => {
+                return Err(crate::error::DashboardError::ImportFormat(
+                    "第一行必须是 task_started".into(),
+                ))
+            }
+        };
+        // 幂等: 已 finish -> 跳过
+        if self.task_exists(&task_id)? && self.task_is_finished(&task_id)? {
+            return Ok(ImportResult {
+                task_id,
+                events_count: 0,
+                skipped: true,
+            });
+        }
+        // 存在但未 finish -> 覆盖 (先删除)
+        if self.task_exists(&task_id)? {
+            self.delete_task(&task_id)?;
+        }
+        // 重新写入
+        let mut events_count = 0usize;
+        let mut execution_events: Vec<ExecutionEvent> = Vec::new();
+        let mut finished_event: Option<TaskFinishedEvent> = None;
+        for entry in &entries {
+            match entry {
+                EventLogEntry::TaskStarted { data, .. } => {
+                    self.start_task(data)?;
+                }
+                EventLogEntry::Execution { event, .. } => {
+                    execution_events.push(event.clone());
+                    events_count += 1;
+                }
+                EventLogEntry::TaskFinished { data, .. } => {
+                    finished_event = Some(data.clone());
+                }
+            }
+        }
+        if !execution_events.is_empty() {
+            self.insert_events(&task_id, &execution_events)?;
+        }
+        if let Some(fin) = finished_event {
+            self.finish_task(&fin)?;
+        }
+        Ok(ImportResult {
+            task_id,
+            events_count,
+            skipped: false,
+        })
+    }
+
     // ---- 内部辅助 (已持有锁) ----
 
     fn task_exists_locked(&self, conn: &Connection, task_id: &str) -> Result<bool> {
@@ -1148,5 +1221,107 @@ mod tests {
         assert_eq!(devs.len(), 1);
         assert_eq!(devs[0].step, "test");
         assert_eq!(devs[0].note.as_deref(), Some("跳过测试"));
+    }
+
+    fn sample_jsonl(task_id: &str, finished: bool) -> String {
+        let mut lines = Vec::new();
+        // 注意: EventLogEntry::TaskStarted 用 #[serde(flatten)] data,
+        // task_id 字段在外层, data 内也有 task_id, JSON 需保证两者一致
+        let started_line = serde_json::json!({
+            "kind": "task_started",
+            "task_id": task_id,
+            "project": "group/proj",
+            "mr_iid": 42,
+            "pipeline_id": 100,
+            "task_description": "修复 bug",
+            "task_kind": "mr_comment",
+            "started_at": "2026-08-03T10:00:00Z",
+            "model": "deepseek-chat",
+        });
+        lines.push(started_line.to_string());
+        lines.push(serde_json::json!({
+            "kind": "execution",
+            "task_id": task_id,
+            "event": { "type": "llm_call", "iteration": 1, "prompt_tokens": 100, "completion_tokens": 50, "latency_ms": 500 }
+        }).to_string());
+        lines.push(serde_json::json!({
+            "kind": "execution",
+            "task_id": task_id,
+            "event": { "type": "tool_call", "name": "read_file", "success": true, "latency_ms": 10, "detail": "a.rs" }
+        }).to_string());
+        if finished {
+            lines.push(serde_json::json!({
+                "kind": "task_finished",
+                "task_id": task_id,
+                "status": "success",
+                "duration_secs": 45,
+                "total_tokens": 150,
+                "estimated_cost_usd": 0.01,
+                "mr_url": "https://gitlab.com/mr/42",
+                "ci_url": null,
+                "summary": "已修复",
+                "error": null,
+                "finished_at": "2026-08-03T10:01:00Z"
+            }).to_string());
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn import_new_task_succeeds() {
+        let s = Storage::open_in_memory().unwrap();
+        let content = sample_jsonl("imp-1", true);
+        let result = s.import_from_jsonl(&content).unwrap();
+        assert_eq!(result.task_id, "imp-1");
+        assert!(!result.skipped);
+        assert_eq!(result.events_count, 2);
+        let row = s.get_task("imp-1").unwrap().unwrap();
+        assert_eq!(row.status, "success");
+        assert_eq!(row.total_tokens, 150);
+    }
+
+    #[test]
+    fn import_finished_task_is_skipped() {
+        let s = Storage::open_in_memory().unwrap();
+        let content = sample_jsonl("imp-2", true);
+        s.import_from_jsonl(&content).unwrap();
+        // 再次导入 -> 已 finish,跳过
+        let result = s.import_from_jsonl(&content).unwrap();
+        assert!(result.skipped);
+    }
+
+    #[test]
+    fn import_running_task_overwrites() {
+        let s = Storage::open_in_memory().unwrap();
+        // 先导入一个未 finish 的 (running)
+        let running_content = sample_jsonl("imp-3", false);
+        s.import_from_jsonl(&running_content).unwrap();
+        assert_eq!(s.get_task("imp-3").unwrap().unwrap().status, "running");
+        // 再导入完整版本 -> 覆盖
+        let full_content = sample_jsonl("imp-3", true);
+        let result = s.import_from_jsonl(&full_content).unwrap();
+        assert!(!result.skipped);
+        assert_eq!(s.get_task("imp-3").unwrap().unwrap().status, "success");
+    }
+
+    #[test]
+    fn import_invalid_format_returns_error() {
+        let s = Storage::open_in_memory().unwrap();
+        let bad = "not a json line\n{also bad}";
+        let err = s.import_from_jsonl(bad).unwrap_err();
+        assert!(matches!(err, crate::error::DashboardError::ImportFormat(_)));
+    }
+
+    #[test]
+    fn import_missing_task_started_returns_error() {
+        let s = Storage::open_in_memory().unwrap();
+        // 第一行不是 task_started
+        let bad = serde_json::json!({
+            "kind": "execution",
+            "task_id": "x",
+            "event": { "type": "llm_call", "iteration": 1, "prompt_tokens": 1, "completion_tokens": 1, "latency_ms": 1 }
+        }).to_string();
+        let err = s.import_from_jsonl(&bad).unwrap_err();
+        assert!(matches!(err, crate::error::DashboardError::ImportFormat(_)));
     }
 }
