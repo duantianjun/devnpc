@@ -95,6 +95,8 @@ tokio-test = "0.4"
 mockall = "0.13"
 tempfile = "3"
 wiremock = "0.6"
+# 用于在 devnpc 集成测试中调用 dashboard Storage::import_from_jsonl 验证文件可导入
+devnpc-dashboard = { path = "../devnpc-dashboard" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("deepseek", "openai", "anthropic", "gemini"))'] }
