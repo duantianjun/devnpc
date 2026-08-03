@@ -9,11 +9,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# 先复制依赖描述文件,利用 layer 缓存
+# 先复制 workspace 依赖描述文件,利用 layer 缓存
 COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
+COPY crates/devnpc-core/Cargo.toml ./crates/devnpc-core/
+COPY crates/devnpc/Cargo.toml ./crates/devnpc/
 
-# 用 BuildKit cache mount 加速构建 (避免重复下载/编译依赖)
+# 创建空源文件占位,让 cargo 能解析依赖图并预编译依赖 (利用 cache mount)
+RUN mkdir -p crates/devnpc-core/src crates/devnpc/src && \
+    echo "" > crates/devnpc-core/src/lib.rs && \
+    echo "" > crates/devnpc/src/lib.rs && \
+    echo "" > crates/devnpc/src/main.rs
+
+# 用 BuildKit cache mount 预编译依赖 (失败不中断,实际源码复制后会重新编译)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release || true
+
+# 复制实际源码 (workspace 拆分后源码位于 crates/devnpc/src/ 和 crates/devnpc-core/src/)
+COPY crates/devnpc-core/src/ ./crates/devnpc-core/src/
+COPY crates/devnpc/src/ ./crates/devnpc/src/
+COPY crates/devnpc/tests/ ./crates/devnpc/tests/
+
+# 构建二进制并复制到 /usr/local/bin
 # 注意: target 目录在 cache 中,构建完需 cp 出二进制
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
